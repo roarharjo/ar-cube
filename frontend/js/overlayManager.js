@@ -37,6 +37,9 @@ class OverlayManager {
 
         model.matrixAutoUpdate = false;
         model.matrix.copy(finalMatrix);
+        // Critical: with matrixAutoUpdate=false, Three.js won't recompute matrixWorld
+        // unless we explicitly flag it. Without this, the model renders at world origin.
+        model.matrixWorldNeedsUpdate = true;
     }
 }
 

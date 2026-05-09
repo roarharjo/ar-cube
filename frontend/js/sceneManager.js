@@ -1,7 +1,10 @@
 /**
  * Scene Manager Module
- * Manages Three.js scene, camera, renderer, postprocessing (bloom), lighting,
- * and the procedural glowing cube model.
+ * Manages Three.js scene, camera, renderer, and the procedural glowing cube model.
+ *
+ * Glow is faked via multi-shell wireframe (stacked edges at increasing sizes with
+ * decreasing opacity). This avoids the canvas-transparency issues that come with
+ * EffectComposer-based bloom on a transparent overlay canvas.
  */
 
 class SceneManager {
@@ -10,7 +13,6 @@ class SceneManager {
         this.scene = new THREE.Scene();
         this.camera = null;
         this.renderer = null;
-        this.composer = null;
         this.cube = null;
         this.initialized = false;
     }
@@ -25,6 +27,7 @@ class SceneManager {
             canvas: this.canvas,
             alpha: true,
             antialias: true,
+            premultipliedAlpha: false,
         });
         this.renderer.setSize(videoWidth, videoHeight);
         this.renderer.setClearColor(0x000000, 0);
@@ -34,106 +37,64 @@ class SceneManager {
         this.camera = new THREE.PerspectiveCamera(fov, aspect, 0.001, 1000);
         this.camera.position.set(0, 0, 0);
 
-        this._setupLights();
-        this._setupPostprocessing(videoWidth, videoHeight);
         this._buildCube();
 
         this.initialized = true;
         this._animate();
     }
 
-    /**
-     * Get the procedurally-built cube. The overlay manager applies pose
-     * transforms to this object.
-     * @returns {THREE.Group}
-     */
     getCube() {
         return this.cube;
     }
 
-    /**
-     * Get the current camera.
-     * @returns {THREE.PerspectiveCamera}
-     */
     getCamera() {
         return this.camera;
     }
 
-    /**
-     * Whether the scene has been initialized.
-     * @returns {boolean}
-     */
     isReady() {
         return this.initialized;
     }
 
-    _setupLights() {
-        // Subtle ambient — main visual punch comes from emissive bloom
-        const ambient = new THREE.AmbientLight(0xffffff, 0.4);
-        this.scene.add(ambient);
-    }
-
-    _setupPostprocessing(width, height) {
-        this.composer = new THREE.EffectComposer(this.renderer);
-        this.composer.setSize(width, height);
-
-        const renderPass = new THREE.RenderPass(this.scene, this.camera);
-        this.composer.addPass(renderPass);
-
-        // UnrealBloomPass: (resolution, strength, radius, threshold)
-        // Threshold 0 = bloom everything bright; tune strength/radius for taste.
-        const bloomPass = new THREE.UnrealBloomPass(
-            new THREE.Vector2(width, height),
-            1.2,  // strength
-            0.6,  // radius
-            0.0   // threshold
-        );
-        this.composer.addPass(bloomPass);
-    }
-
     _buildCube() {
-        // Unit cube — overlayManager scales by physical CUBE_SIDE_LENGTH (0.05m)
-        const cubeGeom = new THREE.BoxGeometry(1, 1, 1);
+        const group = new THREE.Group();
 
-        // Bright neon edges — bloom picks these up
-        const edgesGeom = new THREE.EdgesGeometry(cubeGeom);
-        const edgeMaterial = new THREE.LineBasicMaterial({
-            color: 0x00ffff, // cyan
-            linewidth: 2,
-        });
-        const wireframe = new THREE.LineSegments(edgesGeom, edgeMaterial);
+        // Multi-shell wireframe — fakes a glow halo without postprocessing.
+        // Inner shell is the real cube (size 1.0); outer shells are larger and
+        // increasingly transparent, giving a soft halo around the edges.
+        const shells = [
+            { size: 1.00, opacity: 1.00 },
+            { size: 1.04, opacity: 0.40 },
+            { size: 1.08, opacity: 0.18 },
+            { size: 1.14, opacity: 0.08 },
+        ];
+        for (const { size, opacity } of shells) {
+            const geom = new THREE.BoxGeometry(size, size, size);
+            const edges = new THREE.EdgesGeometry(geom);
+            const material = new THREE.LineBasicMaterial({
+                color: 0x00ffff, // cyan
+                transparent: true,
+                opacity,
+                depthWrite: false,
+            });
+            group.add(new THREE.LineSegments(edges, material));
+        }
 
-        // Subtle inner fill, semi-transparent
-        const fillMaterial = new THREE.MeshBasicMaterial({
-            color: 0x00ffff,
-            transparent: true,
-            opacity: 0.08,
-            side: THREE.DoubleSide,
-            depthWrite: false,
-        });
-        const fill = new THREE.Mesh(cubeGeom, fillMaterial);
-
-        // Bright corner markers
-        const cornerGeom = new THREE.SphereGeometry(0.03, 8, 8);
-        const cornerMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
-        const corners = new THREE.Group();
+        // Bright corner markers at the 8 vertices of the inner cube
+        const cornerGeom = new THREE.SphereGeometry(0.04, 12, 12);
+        const cornerMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
         const half = 0.5;
         for (const sx of [-1, 1]) {
             for (const sy of [-1, 1]) {
                 for (const sz of [-1, 1]) {
-                    const sphere = new THREE.Mesh(cornerGeom, cornerMaterial);
+                    const sphere = new THREE.Mesh(cornerGeom, cornerMat);
                     sphere.position.set(sx * half, sy * half, sz * half);
-                    corners.add(sphere);
+                    group.add(sphere);
                 }
             }
         }
 
-        const group = new THREE.Group();
-        group.add(fill);
-        group.add(wireframe);
-        group.add(corners);
         group.matrixAutoUpdate = false;
-        group.visible = false; // Shown after first successful pose
+        group.visible = false; // shown after first successful pose
 
         this.cube = group;
         this.scene.add(group);
@@ -142,7 +103,7 @@ class SceneManager {
     _animate() {
         requestAnimationFrame(() => this._animate());
         if (this.initialized) {
-            this.composer.render();
+            this.renderer.render(this.scene, this.camera);
         }
     }
 }
