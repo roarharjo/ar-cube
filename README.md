@@ -1,6 +1,6 @@
 # AR Cube Overlay Tool
 
-A browser-based tool for testing AR overlay accuracy and pose estimation on a live webcam feed. Point your webcam at a 5cm white cube, upload a matching 3D model, and the tool tracks the cube continuously and overlays the model in real time using OpenCV pose estimation.
+A browser-based tool for testing AR overlay accuracy and pose estimation on a live webcam feed. Point your webcam at a 5cm white cube and the tool tracks it continuously, overlaying a glowing procedural 3D cube in real time using OpenCV pose estimation.
 
 ## Overview
 
@@ -9,10 +9,10 @@ The tool runs a continuous tracking loop:
 1. Webcam streams live video into the browser
 2. Each captured frame is sent to a local FastAPI backend
 3. The backend detects the cube via contour analysis + sub-pixel corner refinement, then estimates pose with `cv2.solvePnP`
-4. The frontend converts the OpenCV pose to Three.js coordinates and renders the OBJ model on top of the live video
+4. The frontend converts the OpenCV pose to Three.js coordinates and renders a procedurally-built glowing cube (neon edges + corner markers + bloom postprocessing) on top of the live video
 5. Mouse wheel zooms the entire view (video + overlay) for inspection
 
-The target cube is a **5 × 5 × 5 cm white 3D-printed cube** with no markers — detection relies on geometry, not fiducials.
+The target cube is a **5 × 5 × 5 cm white 3D-printed cube** with no markers — detection relies on geometry, not fiducials. There is no model upload — the overlay is built procedurally in Three.js.
 
 ## Architecture
 
@@ -40,7 +40,7 @@ The target cube is a **5 × 5 × 5 cm white 3D-printed cube** with no markers �
 └──────────────────────────────────────────┘
 ```
 
-**Frontend:** Vanilla JavaScript (ES6 modules), Three.js r128 + OBJLoader via CDN, no build step.
+**Frontend:** Vanilla JavaScript (ES6 modules), Three.js r128 + UnrealBloomPass postprocessing via CDN, no build step.
 
 **Backend:** FastAPI, OpenCV, NumPy, Pydantic. Stateless — each request processes one frame independently.
 
@@ -48,18 +48,22 @@ The target cube is a **5 × 5 × 5 cm white 3D-printed cube** with no markers �
 
 ```
 ar-cube/
+├── docker-compose.yml               # Dev orchestration (backend + frontend)
 ├── frontend/
+│   ├── Dockerfile                   # nginx-alpine
+│   ├── .dockerignore
 │   ├── index.html
 │   ├── css/styles.css
 │   └── js/
 │       ├── main.js                  # Orchestrator + tracking loop
 │       ├── webcamHandler.js         # getUserMedia + frame capture
-│       ├── modelLoader.js           # OBJ upload, parse, normalize
-│       ├── sceneManager.js          # Three.js scene/camera/renderer
+│       ├── sceneManager.js          # Three.js scene + bloom + procedural cube
 │       ├── apiClient.js             # fetch wrapper
 │       ├── overlayManager.js        # OpenCV → Three.js coord conversion
 │       └── interactionControls.js   # Mouse wheel zoom
 ├── backend/
+│   ├── Dockerfile                   # python:3.11-slim + opencv deps
+│   ├── .dockerignore
 │   ├── main.py                      # FastAPI app + CORS
 │   ├── config.py                    # Constants (cube size, detection params)
 │   ├── api/routes.py                # POST /api/estimate-pose
@@ -71,20 +75,46 @@ ar-cube/
 │   ├── tests/                       # 16 pytest tests
 │   └── requirements.txt
 └── docs/superpowers/
-    ├── specs/                       # Design spec
-    └── plans/                       # Implementation plan
+    ├── specs/                       # Design specs
+    └── plans/                       # Implementation plans
 ```
 
 ## Setup
 
 ### Prerequisites
 
-- Python 3.9+ (tested on 3.9.6)
 - Modern browser with `getUserMedia` support (Chrome, Firefox, Safari, Edge)
 - A webcam
 - A 5cm white 3D-printed cube + matching OBJ model
+- **Either** Docker Desktop (recommended) **or** Python 3.9+ for a host-side install
 
-### Backend
+### Option 1: Docker (recommended)
+
+```bash
+docker compose up --build
+```
+
+First build takes a few minutes (pulls `python:3.11-slim` + `nginx:alpine`, installs OpenCV). Subsequent starts are fast.
+
+- Frontend: `http://localhost:3000`
+- Backend: `http://localhost:8000` (Swagger UI at `/docs`)
+
+Source is volume-mounted, so editing files on your host is reflected in the running containers:
+- Backend Python changes auto-reload (uvicorn `--reload`)
+- Frontend changes appear after a browser refresh
+
+Useful commands:
+
+```bash
+docker compose down                                    # stop and remove containers
+docker compose logs -f backend                         # tail backend logs
+docker compose exec backend python -m pytest tests/    # run tests in container
+docker compose up --build                              # rebuild after dependency change
+```
+
+### Option 2: Host install (without Docker)
+
+**Backend:**
 
 ```bash
 cd backend
@@ -96,31 +126,36 @@ python main.py
 
 The API runs on `http://localhost:8000`.
 
-### Frontend
+**Frontend:**
 
 ```bash
 cd frontend
 python3 -m http.server 3000
 ```
 
-Open `http://localhost:3000` in your browser. The page must be served over HTTP (not opened as a `file://` URL) for `getUserMedia` to work.
+Open `http://localhost:3000`. The page must be served over HTTP (not opened as a `file://` URL) for `getUserMedia` to work.
 
 ### Running tests
 
+In Docker:
+
 ```bash
-cd backend
-source venv/bin/activate
-python -m pytest tests/ -v
+docker compose exec backend python -m pytest tests/ -v
+```
+
+On the host:
+
+```bash
+cd backend && source venv/bin/activate && python -m pytest tests/ -v
 ```
 
 ## Usage
 
 1. **Start Camera** — click the button and grant webcam permission. The video feed appears.
-2. **Upload OBJ Model** — pick a `.obj` file (max 1 MB). Origin should be at the model's center; scale doesn't matter.
-3. **Position the cube** in front of the webcam.
-4. **Start Tracking** — click the toggle. The 3D model overlays the live cube and updates continuously.
-5. **Inspect** — use the mouse wheel anywhere over the viewer to zoom both video and overlay together.
-6. **Stop Tracking** — click the toggle again to pause processing. Webcam stays live.
+2. **Position the cube** in front of the webcam.
+3. **Start Tracking** — click the toggle. A glowing cyan cube with bright corner markers overlays the live cube and updates continuously.
+4. **Inspect** — use the mouse wheel anywhere over the viewer to zoom both video and overlay together.
+5. **Stop Tracking** — click the toggle again to pause processing. Webcam stays live.
 
 ### What you'll see
 
@@ -162,8 +197,9 @@ Interactive API docs: `http://localhost:8000/docs`
 | Pose solver | `cv2.SOLVEPNP_IPPE_SQUARE` | Optimal solver for 4 coplanar square corner points |
 | Camera intrinsics | Estimated from frame dimensions (focal length = width, principal point = center, no distortion) | Internal tool; calibration would add scope without proportional benefit |
 | Tracking cadence | In-flight throttling, ~10 fps cap | Auto-adapts to backend latency without queueing requests |
-| Lost detection | Keep last good pose | Stable visual experience; model lags rather than blinks off |
+| Lost detection | Keep last good pose | Stable visual experience; cube lags rather than blinks off |
 | Zoom | CSS scale on the video container (not Three.js camera) | Preserves AR alignment — video and overlay scale uniformly |
+| Overlay model | Procedural Three.js cube with bloom postprocessing | No upload step needed; glowing neon edges + corner markers + UnrealBloomPass for the "fancy" sci-fi look |
 
 ## Known Limitations
 
@@ -181,9 +217,9 @@ If detection is unreliable on your hardware, `backend/services/feature_detector.
 
 **"Cannot connect to backend"** — verify the backend is running on `localhost:8000`. Check the terminal for uvicorn startup output.
 
-**Model loads but doesn't appear** — check the browser console for errors. Verify the OBJ has visible geometry (some exporters produce empty groups).
+**Glow is too strong / too dim** — tune `strength`, `radius`, `threshold` in `_setupPostprocessing` inside `frontend/js/sceneManager.js`. To remove the glow entirely, swap `this.composer.render()` for `this.renderer.render(this.scene, this.camera)` in the same file.
 
-**Overlay drifts off the cube** — could be a coordinate-conversion or scale issue. Confirm the OBJ is centered at origin, and that `CUBE_SIDE_LENGTH` in `frontend/js/overlayManager.js` matches `backend/config.py` (both 0.05 m).
+**Overlay drifts off the cube** — likely a coordinate-conversion or scale issue. Confirm `CUBE_SIDE_LENGTH` in `frontend/js/overlayManager.js` matches `backend/config.py` (both 0.05 m).
 
 **Tracking is jumpy or unstable** — try tuning `MIN_FRAME_INTERVAL_MS` in `frontend/js/main.js` (raise it to reduce flicker at the cost of latency) or the detection params in `backend/config.py`.
 

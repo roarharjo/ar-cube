@@ -14,20 +14,12 @@
         </header>
 
         <main>
-            <!-- Upload Section -->
+            <!-- Controls -->
             <section class="upload-section">
                 <div class="upload-controls">
                     <div class="upload-group">
                         <button id="startCameraButton" class="btn">Start Camera</button>
                         <span id="cameraStatus" class="status-indicator">Camera off</span>
-                    </div>
-
-                    <div class="upload-group">
-                        <label for="objUpload" class="upload-label">
-                            <span class="label-text">OBJ Model</span>
-                            <input type="file" id="objUpload" accept=".obj" />
-                        </label>
-                        <span id="objStatus" class="status-indicator">Not loaded</span>
                     </div>
 
                     <button id="trackingButton" class="btn-primary" disabled>
@@ -56,8 +48,7 @@
                 <h3>Instructions</h3>
                 <ol>
                     <li>Click "Start Camera" and grant camera permission</li>
-                    <li>Upload the matching OBJ 3D model file</li>
-                    <li>Position the cube in view of the camera</li>
+                    <li>Position your 5cm white cube in view of the camera</li>
                     <li>Click "Start Tracking" to begin continuous pose estimation</li>
                     <li>Use mouse wheel over the viewer to zoom in/out</li>
                 </ol>
@@ -71,12 +62,18 @@
         </div>
     </div>
 
-    <!-- Three.js Library -->
+    <!-- Three.js core -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
+
+    <!-- Three.js postprocessing for glow/bloom effect -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
 
     <!-- Application Scripts -->
     <script type="module" src="js/main.js"></script>
 </body>
 </html>
-

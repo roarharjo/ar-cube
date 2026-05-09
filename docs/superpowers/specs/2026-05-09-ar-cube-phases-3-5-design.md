@@ -5,6 +5,8 @@
 **Approach:** Parallel build (backend + frontend 3D), then integration
 
 > **Pivot 2026-05-09:** Original plan used file upload of recorded video. Updated to live webcam feed with continuous tracking. File upload removed entirely. Sections 2-3 below describe the post-pivot frontend.
+>
+> **Second pivot 2026-05-09:** OBJ model upload removed. The overlay is now a procedurally-built glowing Three.js cube (neon edges + corner markers + bloom postprocessing). `modelLoader.js` deleted. The cube is built inside `sceneManager.js` during `init()`. Postprocessing dependencies (`EffectComposer`, `RenderPass`, `UnrealBloomPass`, etc.) loaded from CDN.
 
 ---
 
