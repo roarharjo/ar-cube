@@ -47,6 +47,7 @@
 
                 <div class="video-container">
                     <video id="videoPlayer" autoplay muted playsinline></video>
+                    <canvas id="debugCanvas"></canvas>
                     <canvas id="renderCanvas"></canvas>
                     <canvas id="frameCanvas" style="display: none;"></canvas>
 
@@ -83,6 +84,7 @@
                     <dt>Size</dt><dd>50.0 mm</dd>
                     <dt>Color</dt><dd>White</dd>
                     <dt>Markers</dt><dd>None</dd>
+                    <dt>Detect</dt><dd>floodFill from click</dd>
                     <dt>Solver</dt><dd>IPPE_SQUARE</dd>
                 </dl>
 
@@ -93,7 +95,11 @@
                     <li>Click <em>Start Camera</em> &amp; allow access</li>
                     <li>Place cube in frame</li>
                     <li>Click <em>Start Tracking</em></li>
-                    <li>Scroll to zoom video + overlay</li>
+                    <li><em>Click directly on the cube</em> in the viewport</li>
+                    <li><em>Arrows</em> nudge XY, <em>PgUp/Dn</em> nudge Z (Shift = 5×)</li>
+                    <li><em>+/−</em> scale, <em>[ / ]</em> focal length, <em>R</em> reset</li>
+                    <li><em>L</em> toggle level-lock (force upright cube)</li>
+                    <li>Right-click or <em>Esc</em> to re-target</li>
                 </ol>
             </aside>
 

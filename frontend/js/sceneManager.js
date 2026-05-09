@@ -32,15 +32,47 @@ class SceneManager {
         this.renderer.setSize(videoWidth, videoHeight);
         this.renderer.setClearColor(0x000000, 0);
 
-        const fov = 2 * Math.atan(videoHeight / (2 * videoWidth)) * (180 / Math.PI);
+        // Default focal heuristic (focal = video_width). Real webcams are
+        // often wider — adjust via setFocalScale() to match your camera.
+        this._videoWidth = videoWidth;
+        this._videoHeight = videoHeight;
+        this._focalScale = 1.0;
+
         const aspect = videoWidth / videoHeight;
-        this.camera = new THREE.PerspectiveCamera(fov, aspect, 0.001, 1000);
+        this.camera = new THREE.PerspectiveCamera(
+            this._computeFov(),
+            aspect,
+            0.001,
+            1000,
+        );
         this.camera.position.set(0, 0, 0);
 
         this._buildCube();
 
         this.initialized = true;
         this._animate();
+    }
+
+    _computeFov() {
+        // focal_pixels = video_width * focalScale → vertical_fov = 2*atan(H / (2*focal))
+        const focalPixels = this._videoWidth * this._focalScale;
+        return 2 * Math.atan(this._videoHeight / (2 * focalPixels)) * (180 / Math.PI);
+    }
+
+    setFocalScale(scale) {
+        this._focalScale = Math.max(0.2, Math.min(3.0, scale));
+        if (this.camera) {
+            this.camera.fov = this._computeFov();
+            this.camera.updateProjectionMatrix();
+        }
+    }
+
+    getFocalScale() {
+        return this._focalScale;
+    }
+
+    nudgeFocalScale(delta) {
+        this.setFocalScale(this._focalScale + delta);
     }
 
     getCube() {
@@ -79,8 +111,11 @@ class SceneManager {
             group.add(new THREE.LineSegments(edges, material));
         }
 
-        // Bright corner markers at the 8 vertices of the inner cube
-        const cornerGeom = new THREE.SphereGeometry(0.04, 12, 12);
+        // Bright corner markers at the 8 vertices of the inner cube.
+        // Radius is in unit-cube space; final size is radius * CUBE_SIDE_LENGTH.
+        // 0.018 → ~0.9mm radius (~1.8mm diameter) on a 5cm cube — visible
+        // without dominating when the cube is close to the camera.
+        const cornerGeom = new THREE.SphereGeometry(0.018, 12, 12);
         const cornerMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
         const half = 0.5;
         for (const sx of [-1, 1]) {

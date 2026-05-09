@@ -11,13 +11,22 @@ class ApiClient {
      * @param {Blob} frameBlob - JPEG image blob
      * @param {number} videoWidth
      * @param {number} videoHeight
+     * @param {{x: number, y: number}|null} target - Optional target hint in image-pixel coords
      * @returns {Promise<Object>} Parsed JSON response
      */
-    async sendFrame(frameBlob, videoWidth, videoHeight) {
+    async sendFrame(frameBlob, videoWidth, videoHeight, target = null) {
         const formData = new FormData();
         formData.append('image', frameBlob, 'frame.jpg');
 
-        const url = `${API_BASE_URL}/api/estimate-pose?video_width=${videoWidth}&video_height=${videoHeight}`;
+        const params = new URLSearchParams({
+            video_width: String(videoWidth),
+            video_height: String(videoHeight),
+        });
+        if (target) {
+            params.set('target_x', String(target.x));
+            params.set('target_y', String(target.y));
+        }
+        const url = `${API_BASE_URL}/api/estimate-pose?${params}`;
 
         let response;
         try {
