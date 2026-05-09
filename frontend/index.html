@@ -10,7 +10,7 @@
     <div class="container">
         <header>
             <h1>AR Cube Overlay Tool</h1>
-            <p class="subtitle">Upload a video and matching 3D model to test AR overlay accuracy</p>
+            <p class="subtitle">Live webcam AR overlay with continuous 3D pose tracking</p>
         </header>
 
         <main>
@@ -18,11 +18,8 @@
             <section class="upload-section">
                 <div class="upload-controls">
                     <div class="upload-group">
-                        <label for="videoUpload" class="upload-label">
-                            <span class="label-text">Video File</span>
-                            <input type="file" id="videoUpload" accept="video/mp4,video/webm,video/avi" />
-                        </label>
-                        <span id="videoStatus" class="status-indicator">Not loaded</span>
+                        <button id="startCameraButton" class="btn">Start Camera</button>
+                        <span id="cameraStatus" class="status-indicator">Camera off</span>
                     </div>
 
                     <div class="upload-group">
@@ -33,8 +30,8 @@
                         <span id="objStatus" class="status-indicator">Not loaded</span>
                     </div>
 
-                    <button id="alignButton" class="btn-primary" disabled>
-                        Align Model
+                    <button id="trackingButton" class="btn-primary" disabled>
+                        Start Tracking
                     </button>
                 </div>
             </section>
@@ -42,9 +39,7 @@
             <!-- Video and Canvas Section -->
             <section class="viewer-section">
                 <div class="video-container">
-                    <video id="videoPlayer" controls>
-                        Your browser does not support the video element.
-                    </video>
+                    <video id="videoPlayer" autoplay muted playsinline></video>
                     <canvas id="renderCanvas"></canvas>
                     <canvas id="frameCanvas" style="display: none;"></canvas>
                 </div>
@@ -60,11 +55,11 @@
             <section class="instructions">
                 <h3>Instructions</h3>
                 <ol>
-                    <li>Upload a video file containing a cube</li>
+                    <li>Click "Start Camera" and grant camera permission</li>
                     <li>Upload the matching OBJ 3D model file</li>
-                    <li>Play the video and pause at the desired frame</li>
-                    <li>Click "Align Model" to overlay the 3D model</li>
-                    <li>Use mouse wheel to zoom in/out</li>
+                    <li>Position the cube in view of the camera</li>
+                    <li>Click "Start Tracking" to begin continuous pose estimation</li>
+                    <li>Use mouse wheel over the viewer to zoom in/out</li>
                 </ol>
             </section>
         </main>

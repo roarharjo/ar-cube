@@ -1,181 +1,197 @@
 # AR Cube Overlay Tool
 
-A browser-based tool for testing AR overlay accuracy and pose estimation algorithms with real-world video footage of cubes. Upload a video of a cube and its matching 3D model, pause at any frame, and see the model automatically aligned using computer vision.
+A browser-based tool for testing AR overlay accuracy and pose estimation on a live webcam feed. Point your webcam at a 5cm white cube, upload a matching 3D model, and the tool tracks the cube continuously and overlays the model in real time using OpenCV pose estimation.
 
 ## Overview
 
-This tool enables development teams to:
-- Upload a video containing a real-world cube
-- Upload a matching 3D model (OBJ file) that corresponds to the cube
-- Pause the video at any frame
-- Automatically detect the cube and estimate its pose using OpenCV
-- Overlay the 3D model with precise alignment
-- Zoom in/out to inspect alignment accuracy
+The tool runs a continuous tracking loop:
+
+1. Webcam streams live video into the browser
+2. Each captured frame is sent to a local FastAPI backend
+3. The backend detects the cube via contour analysis + sub-pixel corner refinement, then estimates pose with `cv2.solvePnP`
+4. The frontend converts the OpenCV pose to Three.js coordinates and renders the OBJ model on top of the live video
+5. Mouse wheel zooms the entire view (video + overlay) for inspection
+
+The target cube is a **5 × 5 × 5 cm white 3D-printed cube** with no markers — detection relies on geometry, not fiducials.
 
 ## Architecture
 
-- **Frontend**: Vanilla JavaScript with Three.js for 3D rendering
-- **Backend**: FastAPI with OpenCV for computer vision and pose estimation
-- **Key Technologies**: 
-  - Three.js for 3D model rendering
-  - OpenCV's solvePnP for pose estimation
-  - HTML5 video and canvas APIs
+```
+┌──────────────────────────────────────────┐
+│              Browser                      │
+│  ┌─────────┐  ┌────────┐  ┌───────────┐  │
+│  │ Webcam  │  │ Three.js│  │ Tracking  │  │
+│  │ <video> │  │ overlay │  │ loop      │  │
+│  └────┬────┘  └────┬───┘  └─────┬─────┘  │
+│       └────────────┴────────────┘        │
+│                    │                      │
+│         JPEG frame │ POST                 │
+└────────────────────┼──────────────────────┘
+                     │
+┌────────────────────┼──────────────────────┐
+│        FastAPI backend (localhost:8000)   │
+│  ┌──────────┐  ┌──────────┐  ┌────────┐  │
+│  │ Image    │→ │ Feature  │→ │ Pose   │  │
+│  │ decode   │  │ detector │  │ solver │  │
+│  └──────────┘  └──────────┘  └────────┘  │
+│     (JPEG)      (Otsu →       (solvePnP, │
+│                  contour →     IPPE_     │
+│                  cornerSubPix) SQUARE)   │
+└──────────────────────────────────────────┘
+```
+
+**Frontend:** Vanilla JavaScript (ES6 modules), Three.js r128 + OBJLoader via CDN, no build step.
+
+**Backend:** FastAPI, OpenCV, NumPy, Pydantic. Stateless — each request processes one frame independently.
 
 ## Project Structure
 
 ```
-ar_cube/
+ar-cube/
 ├── frontend/
-│   ├── index.html              # Main HTML interface
-│   ├── css/
-│   │   └── styles.css          # Application styling
+│   ├── index.html
+│   ├── css/styles.css
 │   └── js/
-│       ├── main.js             # Application orchestration
-│       ├── videoHandler.js     # Video upload and playback
-│       ├── modelLoader.js      # OBJ file loading
-│       ├── sceneManager.js     # Three.js scene setup
-│       ├── apiClient.js        # Backend API communication
-│       ├── overlayManager.js   # 3D model alignment
-│       └── interactionControls.js  # Zoom controls
+│       ├── main.js                  # Orchestrator + tracking loop
+│       ├── webcamHandler.js         # getUserMedia + frame capture
+│       ├── modelLoader.js           # OBJ upload, parse, normalize
+│       ├── sceneManager.js          # Three.js scene/camera/renderer
+│       ├── apiClient.js             # fetch wrapper
+│       ├── overlayManager.js        # OpenCV → Three.js coord conversion
+│       └── interactionControls.js   # Mouse wheel zoom
 ├── backend/
-│   ├── main.py                 # FastAPI application entry point
-│   ├── api/
-│   │   └── routes.py           # API endpoints
+│   ├── main.py                      # FastAPI app + CORS
+│   ├── config.py                    # Constants (cube size, detection params)
+│   ├── api/routes.py                # POST /api/estimate-pose
 │   ├── services/
-│   │   ├── pose_estimator.py  # Pose estimation logic
-│   │   └── feature_detector.py # Cube detection
-│   ├── models/
-│   │   └── schemas.py          # Pydantic models
-│   └── utils/
-│       └── image_processor.py  # Image processing utilities
-└── tasks/
-    ├── prd-ar-cube-overlay.md  # Product Requirements Document
-    └── tasks-prd-ar-cube-overlay.md  # Task list
-
+│   │   ├── feature_detector.py      # Otsu/adaptive threshold + contour + cornerSubPix
+│   │   └── pose_estimator.py        # solvePnP (SOLVEPNP_IPPE_SQUARE)
+│   ├── models/schemas.py            # Pydantic response model
+│   ├── utils/image_processor.py     # JPEG/PNG decode
+│   ├── tests/                       # 16 pytest tests
+│   └── requirements.txt
+└── docs/superpowers/
+    ├── specs/                       # Design spec
+    └── plans/                       # Implementation plan
 ```
 
-## Setup Instructions
+## Setup
 
 ### Prerequisites
 
-- Python 3.13+ (or Python 3.8+ with compatible package versions)
-- Modern web browser (Chrome, Firefox, Safari, or Edge)
+- Python 3.9+ (tested on 3.9.6)
+- Modern browser with `getUserMedia` support (Chrome, Firefox, Safari, Edge)
+- A webcam
+- A 5cm white 3D-printed cube + matching OBJ model
 
-### Backend Setup
+### Backend
 
-1. Navigate to the backend directory:
-   ```bash
-   cd backend
-   ```
+```bash
+cd backend
+python3 -m venv venv
+source venv/bin/activate       # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+python main.py
+```
 
-2. Create and activate a virtual environment:
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
+The API runs on `http://localhost:8000`.
 
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+### Frontend
 
-4. Run the FastAPI server:
-   ```bash
-   uvicorn main:app --reload --host 0.0.0.0 --port 8000
-   ```
+```bash
+cd frontend
+python3 -m http.server 3000
+```
 
-   The backend API will be available at `http://localhost:8000`
+Open `http://localhost:3000` in your browser. The page must be served over HTTP (not opened as a `file://` URL) for `getUserMedia` to work.
 
-### Frontend Setup
+### Running tests
 
-1. Navigate to the frontend directory:
-   ```bash
-   cd frontend
-   ```
-
-2. Open `index.html` in your web browser, or serve it using a simple HTTP server:
-   ```bash
-   # Python 3
-   python3 -m http.server 8080
-   
-   # Then open http://localhost:8080 in your browser
-   ```
+```bash
+cd backend
+source venv/bin/activate
+python -m pytest tests/ -v
+```
 
 ## Usage
 
-1. **Start the backend server** (see Backend Setup above)
+1. **Start Camera** — click the button and grant webcam permission. The video feed appears.
+2. **Upload OBJ Model** — pick a `.obj` file (max 1 MB). Origin should be at the model's center; scale doesn't matter.
+3. **Position the cube** in front of the webcam.
+4. **Start Tracking** — click the toggle. The 3D model overlays the live cube and updates continuously.
+5. **Inspect** — use the mouse wheel anywhere over the viewer to zoom both video and overlay together.
+6. **Stop Tracking** — click the toggle again to pause processing. Webcam stays live.
 
-2. **Open the frontend** in your web browser
+### What you'll see
 
-3. **Upload files**:
-   - Click "Upload Video" and select your video file containing the cube
-   - Click "Upload OBJ Model" and select the matching 3D model file
+- **Cube locked** — overlay tracks the physical cube as you move it
+- **Cube not visible** — detection failed for this frame; the overlay holds its last known position rather than disappearing
+- **Tracking stopped: …** — the backend connection failed; restart the server and start tracking again
 
-4. **Play and pause** the video at the desired frame
-
-5. **Align model**: Click the "Align Model" button to trigger pose estimation
-   - The backend will detect the cube in the frame
-   - The 3D model will be automatically aligned to match the cube's position and orientation
-
-6. **Inspect alignment**: Use mouse wheel to zoom in/out and verify alignment accuracy
-
-## API Documentation
-
-Once the backend is running, view the interactive API documentation at:
-- Swagger UI: `http://localhost:8000/docs`
-- ReDoc: `http://localhost:8000/redoc`
-
-### Main Endpoint
+## API
 
 **POST** `/api/estimate-pose`
 
-Accepts a video frame image and returns pose estimation data.
+| Param | Location | Description |
+|-------|----------|-------------|
+| `image` | multipart form | JPEG or PNG frame, max 10 MB |
+| `video_width` | query string | Frame width in pixels |
+| `video_height` | query string | Frame height in pixels |
 
-**Request**: Multipart form data with image file
+Response (200):
 
-**Response**:
 ```json
 {
   "success": true,
-  "rotation_matrix": [[r11, r12, r13], [r21, r22, r23], [r31, r32, r33]],
+  "rotation_matrix": [[r00, r01, r02], [r10, r11, r12], [r20, r21, r22]],
   "translation_vector": [tx, ty, tz],
   "camera_matrix": [[fx, 0, cx], [0, fy, cy], [0, 0, 1]],
   "error_message": null
 }
 ```
 
-## Development
+When the cube isn't detected: `success: false`, matrices `null`, `error_message` populated. HTTP 400/422 for invalid input.
 
-### Testing
+Interactive API docs: `http://localhost:8000/docs`
 
-- The tool is designed for internal testing and validation
-- Test with the provided 17-second video and matching OBJ model
-- Verify alignment accuracy through visual inspection
-- Test across all major browsers
+## Key Design Choices
 
-### Browser Compatibility
+| Decision | Choice | Why |
+|----------|--------|-----|
+| Detection | Otsu threshold (primary) + adaptive threshold (fallback) → contour filtering → `cornerSubPix` | White cube has bimodal histograms; Otsu handles them cleanly. Adaptive fallback covers complex lighting. |
+| Pose solver | `cv2.SOLVEPNP_IPPE_SQUARE` | Optimal solver for 4 coplanar square corner points |
+| Camera intrinsics | Estimated from frame dimensions (focal length = width, principal point = center, no distortion) | Internal tool; calibration would add scope without proportional benefit |
+| Tracking cadence | In-flight throttling, ~10 fps cap | Auto-adapts to backend latency without queueing requests |
+| Lost detection | Keep last good pose | Stable visual experience; model lags rather than blinks off |
+| Zoom | CSS scale on the video container (not Three.js camera) | Preserves AR alignment — video and overlay scale uniformly |
 
-- ✅ Chrome (latest)
-- ✅ Firefox (latest)
-- ✅ Safari (latest)
-- ✅ Edge (latest)
+## Known Limitations
+
+- **Plain-white cube on a plain-white background** will likely fail detection (no contrast)
+- **Extreme camera angles** can produce too-narrow faces for reliable contour detection
+- **Strong perspective** can cause the corner-ordering heuristic to mismatch the fixed 3D point ordering, producing occasional wrong-but-non-`null` poses
+- **No camera calibration** — the focal-length heuristic is approximate; absolute distance accuracy is limited
+- **Single camera, single cube** — no multi-camera or multi-cube support
+
+If detection is unreliable on your hardware, `backend/services/feature_detector.py` is the place to tune. The detection params live in `backend/config.py`.
 
 ## Troubleshooting
 
-### Python Dependencies
-If you encounter issues with Python 3.13, the requirements.txt uses version ranges that should be compatible. If problems persist, consider using Python 3.11 or 3.12.
+**Camera permission denied** — click "Start Camera" again to retry. The button is re-enabled on failure.
 
-### CORS Issues
-The backend is configured to allow CORS for development. If you encounter CORS errors, verify the backend CORS middleware configuration in `main.py`.
+**"Cannot connect to backend"** — verify the backend is running on `localhost:8000`. Check the terminal for uvicorn startup output.
 
-### Video Format Issues
-Ensure your video is in a web-compatible format (MP4, WebM). The HTML5 video element has limited codec support in some browsers.
+**Model loads but doesn't appear** — check the browser console for errors. Verify the OBJ has visible geometry (some exporters produce empty groups).
+
+**Overlay drifts off the cube** — could be a coordinate-conversion or scale issue. Confirm the OBJ is centered at origin, and that `CUBE_SIDE_LENGTH` in `frontend/js/overlayManager.js` matches `backend/config.py` (both 0.05 m).
+
+**Tracking is jumpy or unstable** — try tuning `MIN_FRAME_INTERVAL_MS` in `frontend/js/main.js` (raise it to reduce flicker at the cost of latency) or the detection params in `backend/config.py`.
+
+## Documentation
+
+- **Design spec:** `docs/superpowers/specs/2026-05-09-ar-cube-phases-3-5-design.md`
+- **Implementation plan:** `docs/superpowers/plans/2026-05-09-ar-cube-phases-3-5.md`
 
 ## License
 
-Internal testing tool - not for production use.
-
-## Contact
-
-For questions or issues, contact the development team.
-
+Internal testing tool — not for production use.

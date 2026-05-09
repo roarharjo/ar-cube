@@ -1,8 +1,10 @@
 # AR-Cube Phases 3-5 Design Spec
 
 **Date:** 2026-05-09
-**Scope:** Backend pose estimation, frontend 3D system, orchestration & integration
+**Scope:** Backend pose estimation, frontend 3D system with live webcam, orchestration & integration
 **Approach:** Parallel build (backend + frontend 3D), then integration
+
+> **Pivot 2026-05-09:** Original plan used file upload of recorded video. Updated to live webcam feed with continuous tracking. File upload removed entirely. Sections 2-3 below describe the post-pivot frontend.
 
 ---
 
@@ -15,6 +17,11 @@
 | OBJ model origin | Center | User controls the model, will export with center origin |
 | OBJ scale | Normalize in pipeline | Scale doesn't matter in OBJ — overlay pipeline normalizes to match solvePnP output |
 | Cube dimensions | 5cm x 5cm x 5cm | Physical 3D-printed cube |
+| Video source | Live webcam via `getUserMedia` | Replaces file upload — real-time tracking is the primary use case |
+| Tracking cadence | In-flight throttling, max ~10 fps | Send next frame only after previous response returns. Auto-adapts to backend latency |
+| Lost detection | Keep last good pose | Stable visual experience; model lags rather than blinks off |
+| Tracking control | Start/Stop toggle button | User can pause processing while inspecting; webcam preview remains live |
+| Camera selection | Default device | No multi-camera picker for v1 |
 | Build sequence | Parallel (Approach B) | Backend + frontend 3D built in parallel with defined API contract; integration phase wires them together |
 
 ---
@@ -84,7 +91,17 @@ Returns: list of 2D image points (corner coordinates), or error if no valid face
 
 ---
 
-## 2. Frontend 3D System (Phase 4)
+## 2. Frontend (Phases 4-5, post-pivot)
+
+### 2.0 Webcam Handler — `webcamHandler.js` (replaces `videoHandler.js`)
+
+- Requests camera access via `navigator.mediaDevices.getUserMedia({ video: true })`
+- Streams into the existing `<video>` element (autoplay, muted, no controls)
+- `extractFrame()` — same JPEG blob output as the previous video handler, but operates on the live stream
+- Status indicator: "Camera off" → "Requesting camera…" → "Camera live"
+- Dispatches `webcamReady` event with stream dimensions when video metadata loads
+- Cleanup: stops stream tracks on page unload
+- The original file-upload `videoHandler.js` is removed entirely
 
 ### 2.1 Scene Manager — `sceneManager.js`
 
@@ -137,32 +154,34 @@ Returns: list of 2D image points (corner coordinates), or error if no valid face
 Initializes all modules on `DOMContentLoaded` and coordinates the workflow:
 
 **Event wiring:**
-1. `videoLoaded` → enable model upload
-2. `modelLoaded` → add model to scene, update button state
-3. `videoPaused` → update "Align Model" button state
-4. "Align Model" button click → trigger alignment pipeline
+1. "Start Camera" click → request webcam access via `webcamHandler`
+2. `webcamReady` event → init scene with stream dimensions, enable Start Tracking when model also loaded
+3. `modelLoaded` event → add model to scene, enable Start Tracking when webcam also ready
+4. "Start Tracking" / "Stop Tracking" button → toggles continuous tracking loop
 
 **Button state logic:**
-- "Align Model" enabled only when: video loaded AND model loaded AND video is paused
+- "Start Tracking" enabled only when: webcam ready AND model loaded
+- Label toggles between "Start Tracking" and "Stop Tracking"
 
-**Alignment pipeline (on button click):**
-1. Show loading spinner
-2. `videoHandler.extractFrame()` → JPEG blob
-3. `apiClient.sendFrame(blob, width, height)` → pose response JSON
-4. If `success`: `overlayManager.applyPose(response)` → model appears aligned over video
-5. If `!success`: display `error_message` to user
-6. Hide spinner
+**Tracking loop (in-flight throttling):**
+1. Capture frame from webcam stream → JPEG blob
+2. POST to `/api/estimate-pose` (no spinner — would flicker; status text instead)
+3. If `success`: `overlayManager.applyPose(response)` → updates model pose
+4. If `!success` (no cube detected): keep current pose (no visual change)
+5. If network error: stop loop, show error
+6. As soon as the response returns, schedule the next iteration (cap to ~10 fps via min interval, e.g. 100ms)
+7. Loop continues until user clicks "Stop Tracking"
 
-**Re-alignment:** User can seek to a new frame, pause, and click "Align Model" again — replaces previous pose.
+**No spinner during tracking:** the spinner is only shown briefly during initial webcam request. Continuous frame processing uses an unobtrusive status text ("Tracking…" / "Cube not visible").
 
 ### 3.3 State Dependency Graph
 
 ```
-Video loaded ──┐
-               ├── Video paused ──┐
-Model loaded ──┘                  ├── "Align Model" enabled
-                                  │
-                            Click ──► extractFrame → API → applyPose → render
+Start Camera click ──► webcamReady ──┐
+                                     ├── Start Tracking enabled
+Model uploaded ──► modelLoaded ──────┘
+                                     │
+                          Toggle ──► tracking loop (continuous)
 ```
 
 ---
@@ -171,11 +190,11 @@ Model loaded ──┘                  ├── "Align Model" enabled
 
 | Scenario | Handling |
 |----------|----------|
-| No cube detected in frame | Backend returns `success: false` + message. Frontend shows error. |
-| Invalid image format | Backend returns 400. Frontend shows error. |
-| Backend unreachable | apiClient catches network error, shows "Cannot connect to backend" |
+| No cube detected in frame | Backend returns `success: false`. Frontend keeps last pose, updates status text quietly. |
+| Backend unreachable | apiClient catches network error, stops tracking loop, shows error |
 | OBJ parse failure | modelLoader catches OBJLoader error, shows message, keeps button disabled |
-| Video not paused when Align clicked | Button is disabled — prevented by state logic |
+| Webcam permission denied | webcamHandler catches `getUserMedia` rejection, shows error message |
+| Webcam not available | Same as denied — error message |
 
 ---
 
