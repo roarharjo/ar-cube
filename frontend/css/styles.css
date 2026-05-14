@@ -663,3 +663,18 @@ body.is-tracking .reg-mark {
         left: -10px;
     }
 }
+
+/* ── Calibration Modal ─────────────────────────────────────── */
+.modal { position: fixed; inset: 0; background: rgba(0,0,0,0.8); display: flex; align-items: center; justify-content: center; z-index: 50; }
+.modal.hidden { display: none; }
+.modal-card { background: #0a0e10; border: 1px solid #1d2a30; padding: 28px 32px; max-width: 520px; color: #cdd9dd; font-family: 'IBM Plex Mono', monospace; }
+.modal-card h2 { color: #00ffcc; font-family: 'IBM Plex Sans Condensed', sans-serif; margin: 0 0 16px; letter-spacing: 0.05em; }
+.modal-card a { color: #00ffcc; }
+.calib-progress { margin: 20px 0; }
+.calib-progress-bar { height: 8px; background: #14191c; border: 1px solid #1d2a30; }
+.calib-progress-fill { height: 100%; background: #00ffcc; width: 0%; transition: width 0.2s; }
+.calib-progress-label { margin-top: 6px; font-size: 13px; color: #6a7a80; }
+.calib-result { min-height: 24px; margin: 16px 0; font-size: 13px; }
+.modal-actions { display: flex; gap: 12px; justify-content: flex-end; }
+.btn-secondary { background: transparent; border: 1px solid #00ffcc; color: #00ffcc; }
+.hidden { display: none !important; }

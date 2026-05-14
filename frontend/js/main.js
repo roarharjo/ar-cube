@@ -5,26 +5,47 @@
 
 import WebcamHandler from './webcamHandler.js';
 import SceneManager from './sceneManager.js';
-import ApiClient from './apiClient.js';
 import OverlayManager from './overlayManager.js';
 import InteractionControls from './interactionControls.js';
+import CvWorker from './cvWorker.js';
+import { TrackerStateMachine, STATES } from './tracker.js';
+import { selectIppeSolution, StillDetector, PoseSmoother } from './poseFilter.js';
+import CalibrationUI from './calibrationUI.js';
+import ApiClient from './apiClient.js';
 
-const MIN_FRAME_INTERVAL_MS = 100; // ~10 fps cap
 const FPS_WINDOW = 10;              // rolling FPS window
 const LATENCY_WINDOW = 10;          // rolling latency window
 const TARGET_SIGMA_PX = 120;        // mirror of backend TARGET_HINT_SIGMA, for visualization
 const TARGET_SMOOTHING = 0.4;       // EMA factor when updating target from detection (0=hold, 1=jump)
-const MAX_FRAME_JUMP_PX = 80;       // max plausible centroid jump between frames at ~10fps
-const MAX_REJECT_STREAK = 8;        // give up after this many consecutive jump-rejections (cube moved far)
 const MAX_DRIFT_FROM_CLICK_PX = 250; // if target wanders this far from original click, force re-anchor
 
 class App {
     constructor() {
         this.webcamHandler = new WebcamHandler();
         this.sceneManager = new SceneManager();
-        this.apiClient = new ApiClient();
         this.overlayManager = new OverlayManager(this.sceneManager);
         this.interactionControls = new InteractionControls();
+        this.cvWorker = new CvWorker();
+        this.apiClient = new ApiClient();
+        this.calibrationUI = new CalibrationUI(this.cvWorker, this.apiClient, (intrinsics) => {
+            this._cameraIntrinsics = { K: intrinsics.K, distCoeffs: intrinsics.distCoeffs };
+            this._intrinsicsMeta = { errPx: intrinsics.errPx, label: intrinsics.cameraLabel };
+            this._showStatus(`Calibrated · reproj err ${intrinsics.errPx.toFixed(2)} px`);
+            this.tracker.send('exitCalibration');
+        });
+        this.calibrateButton = document.getElementById('calibrateButton');
+        this.calibrateButton.addEventListener('click', () => {
+            if (this.tracking) this._stopTracking();
+            this.tracker.send('enterCalibration');
+            this.calibrationUI.open();
+        });
+        this.tracker = new TrackerStateMachine();
+        this.stillDetector = new StillDetector();
+        this.poseSmoother = new PoseSmoother();
+        this._prevR = null;
+        this._prevCorners = null;
+        this._prevSeed = null;
+        this._cameraIntrinsics = null; // populated by Task 16 calibration UI; falls back to heuristic
 
         this.trackingButton = document.getElementById('trackingButton');
         this.debugPanel = document.getElementById('debugPanel');
@@ -41,15 +62,10 @@ class App {
         this.frameCount = 0;
         this.successCount = 0;
         this.failCount = 0;
-        this.rejectStreak = 0;
         this.frameTimestamps = [];
         this.latencies = [];
         this.lastResult = null;
         this.lastError = null;
-
-        // Click-to-track target hint, in image-pixel coordinates. null means no hint.
-        this.target = null;
-        this.originalClick = null; // anchor — target may not drift far from this
 
         this.startTime = performance.now();
 
@@ -73,6 +89,16 @@ class App {
             this._pendingFocalScale = typeof saved.focalScale === 'number' ? saved.focalScale : null;
         } catch {
             // ignore corrupt localStorage
+        }
+        const rawIntr = localStorage.getItem('arcube.intrinsics');
+        if (rawIntr) {
+            try {
+                const intr = JSON.parse(rawIntr);
+                if (intr.version === 1) {
+                    this._cameraIntrinsics = { K: intr.K, distCoeffs: intr.distCoeffs };
+                    this._intrinsicsMeta = { errPx: intr.errPx, label: intr.cameraLabel };
+                }
+            } catch { /* ignore */ }
         }
     }
 
@@ -153,32 +179,31 @@ class App {
         const { width, height } = this.webcamHandler.getDimensions();
         const x = ((event.clientX - rect.left) / rect.width) * width;
         const y = ((event.clientY - rect.top) / rect.height) * height;
-        this.target = { x, y };
-        this.originalClick = { x, y };
-        this.rejectStreak = 0;
+        this.tracker.send('click', { x, y });
+        this._prevSeed = null;
         this.overlayManager.reset(); // snap pose smoothing to new position
         this._showStatus(`target set @ ${Math.round(x)},${Math.round(y)} — right-click or Esc to clear`);
         // Redraw immediately so the user sees the crosshair even before next frame
         this._drawDetectorDebug(
             this.lastResult ? this.lastResult.image_points : null,
-            this.lastResult ? this.lastResult.candidates : null,
+            null,
         );
     }
 
     _clearTarget() {
-        if (!this.target) return;
-        this.target = null;
-        this.originalClick = null;
-        this.rejectStreak = 0;
+        if (!this.tracker.target) return;
+        this.tracker.send('clearTarget');
+        this._prevSeed = null;
         this.overlayManager.reset();
         this._showStatus('target cleared');
         this._drawDetectorDebug(
             this.lastResult ? this.lastResult.image_points : null,
-            this.lastResult ? this.lastResult.candidates : null,
+            null,
         );
     }
 
     _onWebcamReady(event) {
+        this.tracker.send('cameraReady');
         const { width, height } = event.detail;
         this.webcamReady = true;
 
@@ -197,6 +222,7 @@ class App {
         this.debugCanvas.height = height;
 
         this._updateTrackingButton();
+        this.calibrateButton.disabled = false;
         this._updateViewportHeader();
         this._renderDebugPanel();
     }
@@ -226,14 +252,16 @@ class App {
         this.frameCount = 0;
         this.successCount = 0;
         this.failCount = 0;
-        this.rejectStreak = 0;
         this.frameTimestamps = [];
         this.latencies = [];
         this.lastError = null;
+        this.tracker.send('startTracking');
         this._trackingLoop();
     }
 
     _stopTracking() {
+        this.tracker.send('stopTracking');
+        this._prevSeed = null;
         this.tracking = false;
         document.body.classList.remove('is-tracking');
         this.trackingButton.textContent = 'Start Tracking';
@@ -253,7 +281,7 @@ class App {
         const labelSize = Math.max(13, Math.round(w / 95));
 
         // Draw target hint first (under everything else)
-        if (this.target) this._drawTarget(ctx, this.target, baseLine);
+        if (this.tracker.target) this._drawTarget(ctx, this.tracker.target, baseLine);
 
         // Draw rejected candidates first (under the winner) — solid yellow with score+reason
         if (Array.isArray(candidates)) {
@@ -372,61 +400,138 @@ class App {
     }
 
     async _trackingLoop() {
-        while (this.tracking) {
-            const loopStart = performance.now();
+        await this.cvWorker.ready();
+
+        if (this.cvWorker.caps && !this._loggedCaps) {
+            this._loggedCaps = true;
+            const missing = Object.entries(this.cvWorker.caps)
+                .filter(([, v]) => !v)
+                .map(([k]) => k);
+            if (missing.length) {
+                console.warn('OpenCV.js missing functions (degraded mode):', missing.join(', '));
+                this._showStatus(`OpenCV.js missing: ${missing.join(', ')} — tracking degraded`);
+            } else {
+                console.log('OpenCV.js capabilities: full');
+            }
+        }
+
+        const videoEl = document.getElementById('videoPlayer');
+        const step = async () => {
+            if (!this.tracking) return;
             this.frameCount += 1;
+            const loopStart = performance.now();
 
             try {
-                const frameBlob = await this.webcamHandler.extractFrame();
-                const { width, height } = this.webcamHandler.getDimensions();
-                const result = await this.apiClient.sendFrame(frameBlob, width, height, this.target);
-                const latency = performance.now() - loopStart;
-                this._recordLatency(latency);
+                const bitmap = await createImageBitmap(videoEl);
+                const intrinsics = this._effectiveIntrinsics(bitmap.width, bitmap.height);
 
-                this.lastResult = result;
-                const cube = this.sceneManager.getCube();
-                if (result.success) {
-                    // Frame-to-frame jump validation: if the new centroid is far
-                    // from the current target, the detection probably latched
-                    // onto something other than the cube. Reject — but give up
-                    // the validation after MAX_REJECT_STREAK frames so the user
-                    // can recover from a fast cube move.
-                    const newCentroid = this._centroidOf(result.image_points);
-                    const jumpedTooFar = (
-                        this.target
-                        && newCentroid
-                        && this._distance(newCentroid, this.target) > MAX_FRAME_JUMP_PX
-                        && this.rejectStreak < MAX_REJECT_STREAK
-                    );
-                    const driftedFromClick = (
-                        this.originalClick
-                        && newCentroid
-                        && this._distance(newCentroid, this.originalClick) > MAX_DRIFT_FROM_CLICK_PX
-                    );
+                // One-step constant-velocity prediction for the floodFill seed.
+                const target = this.tracker.target || { x: bitmap.width / 2, y: bitmap.height / 2 };
+                const seed = (this._prevSeed && this.tracker.target)
+                    ? {
+                        x: target.x + (target.x - this._prevSeed.x),
+                        y: target.y + (target.y - this._prevSeed.y),
+                      }
+                    : target;
+                this._prevSeed = { ...target };
 
-                    if (jumpedTooFar || driftedFromClick) {
-                        this.rejectStreak += 1;
-                        this.failCount += 1;
-                        this._drawDetectorDebug(null, result.candidates);
-                        const reason = driftedFromClick ? 'drifted from click' : `jumped (${this.rejectStreak}/${MAX_REJECT_STREAK})`;
-                        this._showStatus(`detection ${reason} — re-click to recover`);
-                    } else {
-                        this.rejectStreak = 0;
-                        this.successCount += 1;
-                        this.overlayManager.applyPose(result, cube);
-                        cube.visible = true;
-                        this._updateTargetFromDetection(result.image_points);
-                        this._drawDetectorDebug(result.image_points, result.candidates);
-                        this._showStatus(this.target ? 'cube locked · tracking hint' : 'cube locked');
-                    }
-                } else {
+                const res = await this.cvWorker.track(bitmap, {
+                    seed,
+                    prevCorners: this._prevCorners,
+                });
+
+                this._recordLatency(performance.now() - loopStart);
+
+                if (!res.ok) {
+                    this.tracker.send('detectFail');
                     this.failCount += 1;
-                    this._drawDetectorDebug(null, result.candidates);
-                    this._showStatus('cube not visible');
+                    this._showStatus(this.tracker.state === STATES.lost
+                        ? 'cube lost — searching…'
+                        : 'cube not visible');
+                } else {
+                    // Drift check
+                    if (this.tracker.originalClick) {
+                        const dx = res.centroid.x - this.tracker.originalClick.x;
+                        const dy = res.centroid.y - this.tracker.originalClick.y;
+                        if (Math.hypot(dx, dy) > MAX_DRIFT_FROM_CLICK_PX) {
+                            this.tracker.send('drift');
+                            this._prevSeed = null;
+                            this._showStatus('detection drifted from click — re-click to recover');
+                            this._drawDetectorDebug(null, null);
+                            this._scheduleNext(loopStart, step);
+                            return;
+                        }
+                    }
+
+                    // Pose solve happens server-side now.
+                    let poseRes;
+                    try {
+                        poseRes = await this.apiClient.solvePose(
+                            res.corners, intrinsics.K, intrinsics.distCoeffs,
+                        );
+                    } catch (err) {
+                        this.tracker.send('detectFail');
+                        this.failCount += 1;
+                        this._showStatus(`pose solver unreachable: ${err.message}`);
+                        this._scheduleNext(loopStart, step);
+                        return;
+                    }
+                    if (!poseRes.success || !poseRes.solutions || poseRes.solutions.length === 0) {
+                        this.tracker.send('detectFail');
+                        this.failCount += 1;
+                        this._showStatus(`pose solver failed: ${poseRes.error_message || 'no solution'}`);
+                        this._scheduleNext(loopStart, step);
+                        return;
+                    }
+
+                    // Convert backend snake_case to camelCase for selectIppeSolution.
+                    const solutions = poseRes.solutions.map(s => ({
+                        R: s.R, t: s.t, errPx: s.err_px,
+                    }));
+                    const chosen = selectIppeSolution(solutions, this._prevR ? { R: this._prevR } : null);
+
+                    if (!this._loggedFirstPose && chosen) {
+                        this._loggedFirstPose = true;
+                        // eslint-disable-next-line no-console
+                        console.log('[first pose]', {
+                            R: chosen.R,
+                            t: chosen.t,
+                            errPx: chosen.errPx,
+                            solutionCount: solutions.length,
+                        });
+                    }
+
+                    // Distance sanity (NaN-safe)
+                    const dist = Math.hypot(chosen.t[0], chosen.t[1], chosen.t[2]);
+                    if (!Number.isFinite(dist) || dist < 0.08 || dist > 3.0) {
+                        this.tracker.send('detectFail');
+                        this.failCount += 1;
+                        this._showStatus('pose distance out of range — frame rejected');
+                    } else {
+                        this.tracker.send('detectOk', { centroid: res.centroid });
+                        this.successCount += 1;
+                        this._prevR = chosen.R;
+                        this._prevCorners = res.corners;
+
+                        const stillOut = this.stillDetector.update({ R: chosen.R, t: chosen.t }, res.centroid);
+                        const smoothed = this.poseSmoother.update(stillOut.pose);
+
+                        this.lastResult = {
+                            success: true,
+                            rotation_matrix: smoothed.R,
+                            translation_vector: smoothed.t,
+                            image_points: res.corners,
+                            detection_method: 'client_floodfill + backend_pnp',
+                        };
+                        this.overlayManager.applyPose(smoothed, this.sceneManager.getCube());
+                        this.sceneManager.getCube().visible = true;
+                        this._drawDetectorDebug(res.corners, null);
+                        this._showStatus(stillOut.isStill ? 'cube locked · still' : 'cube locked');
+                    }
                 }
             } catch (err) {
                 this.lastError = err.message;
-                this._showError('tracking stopped: ' + err.message);
+                this._showError('tracking error: ' + err.message);
                 this._stopTracking();
                 return;
             }
@@ -434,40 +539,30 @@ class App {
             this._recordFrameTime();
             this._renderDebugPanel();
             this._updateViewportHeader();
+            this._scheduleNext(loopStart, step);
+        };
 
+        step();
+    }
+
+    _scheduleNext(loopStart, fn) {
+        const videoEl = document.getElementById('videoPlayer');
+        if ('requestVideoFrameCallback' in videoEl) {
+            videoEl.requestVideoFrameCallback(() => { if (this.tracking) fn(); });
+        } else {
             const elapsed = performance.now() - loopStart;
-            const wait = Math.max(0, MIN_FRAME_INTERVAL_MS - elapsed);
-            if (wait > 0) {
-                await new Promise((resolve) => setTimeout(resolve, wait));
-            }
+            const wait = Math.max(0, 33 - elapsed); // ~30 fps
+            setTimeout(() => { if (this.tracking) fn(); }, wait);
         }
     }
 
-    _centroidOf(points) {
-        if (!points || points.length < 1) return null;
-        let cx = 0, cy = 0;
-        for (const [x, y] of points) { cx += x; cy += y; }
-        return { x: cx / points.length, y: cy / points.length };
-    }
-
-    _distance(a, b) {
-        const dx = a.x - b.x;
-        const dy = a.y - b.y;
-        return Math.sqrt(dx * dx + dy * dy);
-    }
-
-    _updateTargetFromDetection(points) {
-        // If the user has set a target, update it (smoothly) toward the detected
-        // centroid so the hint follows the cube as it moves. Without an existing
-        // target we leave it null — user must click to opt-in.
-        if (!this.target || !points || points.length < 4) return;
-        let cx = 0, cy = 0;
-        for (const [x, y] of points) { cx += x; cy += y; }
-        cx /= points.length;
-        cy /= points.length;
-        this.target = {
-            x: this.target.x + (cx - this.target.x) * TARGET_SMOOTHING,
-            y: this.target.y + (cy - this.target.y) * TARGET_SMOOTHING,
+    _effectiveIntrinsics(w, h) {
+        if (this._cameraIntrinsics) return this._cameraIntrinsics;
+        const fScale = this.sceneManager.isReady() ? this.sceneManager.getFocalScale() : 1.0;
+        const f = w * fScale;
+        return {
+            K: [[f, 0, w / 2], [0, f, h / 2], [0, 0, 1]],
+            distCoeffs: [0, 0, 0, 0, 0],
         };
     }
 
@@ -567,13 +662,11 @@ class App {
             r2 = `R[2]     : ${r[2].map(v => v.toFixed(2)).join(', ')}`;
             detectLine = `detect   : locked`;
             methodLine = `method   : ${this.lastResult.detection_method || '—'}`;
-        } else if (this.lastResult && !this.lastResult.success) {
-            detectLine = `detect   : ${this.lastResult.error_message || 'no cube'}`;
         }
 
         const errLine = `error    : ${this.lastError || placeholder}`;
-        const targetLine = this.target
-            ? `target   : ${Math.round(this.target.x)}, ${Math.round(this.target.y)}`
+        const targetLine = this.tracker.target
+            ? `target   : ${Math.round(this.tracker.target.x)}, ${Math.round(this.tracker.target.y)}`
             : `target   : ${placeholder} (click cube)`;
         const c = this.overlayManager.getCalibration();
         const focalScale = this.sceneManager.isReady() ? this.sceneManager.getFocalScale() : 1.0;

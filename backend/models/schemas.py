@@ -1,17 +1,32 @@
 # backend/models/schemas.py
-"""Pydantic models for API request/response schemas."""
+"""Pydantic models for the calibration API."""
 
-from typing import Any, Dict, List, Optional
-
+from typing import List, Optional
 from pydantic import BaseModel
 
 
-class PoseEstimationResponse(BaseModel):
+class CalibrationResponse(BaseModel):
     success: bool
-    rotation_matrix: Optional[List[List[float]]] = None
-    translation_vector: Optional[List[float]] = None
     camera_matrix: Optional[List[List[float]]] = None
-    image_points: Optional[List[List[float]]] = None  # 4 detected 2D corners (x, y) in image px
-    candidates: Optional[List[Dict[str, Any]]] = None  # debug: all considered quads (contour mode only)
-    detection_method: Optional[str] = None  # "aruco" or "contour"
+    dist_coeffs: Optional[List[float]] = None
+    reproj_err_px: Optional[float] = None
+    frames_used: Optional[int] = None
+    error_message: Optional[str] = None
+
+
+class PoseSolution(BaseModel):
+    R: List[List[float]]
+    t: List[float]
+    err_px: float
+
+
+class PoseSolveResponse(BaseModel):
+    success: bool
+    solutions: Optional[List[PoseSolution]] = None
+    error_message: Optional[str] = None
+
+
+class ChessboardResponse(BaseModel):
+    success: bool
+    corners: Optional[List[List[float]]] = None
     error_message: Optional[str] = None

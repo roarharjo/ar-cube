@@ -8,10 +8,10 @@ Continuous tracking loop:
 
 1. Webcam streams live video into the browser
 2. User **clicks the cube once** to seed detection (markerless — the click is the disambiguator)
-3. Each captured frame is sent to a local FastAPI backend
-4. Backend uses `cv2.floodFill` from the click point with color tolerance to segment the connected color region under the click, fits 4 corners to that region, and runs `cv2.solvePnP` (IPPE solver) to recover pose
-5. Subsequent frames use the previous detection's centroid as the new flood-fill seed; system follows the cube as it moves
-6. Frontend smooths the pose (translation lerp, rotation slerp), applies any user calibration offset, and renders a procedural multi-shell wireframe cube on top of the live video
+3. A Web Worker running OpenCV.js segments the connected color region under the click via HSV-space `cv.floodFill`, fits 4 corners (refined with `cv.cornerSubPix`), and runs `cv.solvePnPGeneric(SOLVEPNP_IPPE)` to recover pose
+4. The pose pipeline (in `poseFilter.js`) picks between IPPE's two solutions using rotation hysteresis (`reproj_err + α × angular_distance_to_previous`), averages over a 30-frame ring buffer when the cube is still, and applies EMA/slerp smoothing
+5. Frontend applies any user calibration offset and renders a procedural multi-shell wireframe cube on top of the live video
+6. A small FastAPI backend exists only for one-time chessboard-based camera calibration (`POST /api/calibrate-camera`)
 7. Mouse wheel zooms the entire view (video + overlay) for inspection
 
 The target cube is a **5 × 5 × 5 cm white 3D-printed cube** with **no markers**. Detection is driven by the user's click. The overlay is built procedurally — no model upload required.
@@ -21,72 +21,79 @@ The interface is styled as an **optical-bench instrument terminal**: black backg
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────┐
-│                    Browser                        │
-│  ┌─────────┐  ┌─────────┐  ┌──────────────────┐  │
-│  │ Webcam  │  │ Three.js│  │ Tracking loop    │  │
-│  │ <video> │  │ overlay │  │ + calibration    │  │
-│  └────┬────┘  └────┬────┘  └────────┬─────────┘  │
-│       └────────────┴────────────────┘             │
-│                    │                              │
-│         JPEG frame │ POST + target hint           │
-└────────────────────┼──────────────────────────────┘
-                     │
-┌────────────────────┼──────────────────────────────┐
-│        FastAPI backend (localhost:8000)            │
-│  ┌──────────┐  ┌─────────────┐  ┌──────────────┐  │
-│  │ Image    │→ │ click_segment│→ │ Pose solver  │  │
-│  │ decode   │  │ (floodFill) │  │ (solvePnP    │  │
-│  │          │  │ or contour  │  │  + IPPE)     │  │
-│  │          │  │ fallback    │  │ + sanity     │  │
-│  │          │  │             │  │ check        │  │
-│  └──────────┘  └─────────────┘  └──────────────┘  │
-└───────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                         Browser                              │
+│  ┌─────────┐   ┌──────────────────┐   ┌──────────────────┐   │
+│  │ Webcam  │──▶│ OpenCV.js worker │◀─▶│ State machine    │   │
+│  │ <video> │   │ (hot loop)       │   │ + tracking ctrl  │   │
+│  └─────────┘   └──────────────────┘   └────────┬─────────┘   │
+│                          │                     │             │
+│                          ▼                     ▼             │
+│                  ┌──────────────┐      ┌────────────────┐    │
+│                  │ Three.js     │◀─────│ Pose pipeline  │    │
+│                  │ overlay      │      │ (hysteresis,   │    │
+│                  └──────────────┘      │  still-detect, │    │
+│                                        │  smoothing)    │    │
+│                                        └────────────────┘    │
+└──────────────────────────┬───────────────────────────────────┘
+                           │   POST /api/calibrate-camera
+                           ▼   (only during calibration; rare)
+                  ┌──────────────────────────┐
+                  │ Slim FastAPI backend     │
+                  │ cv2.findChessboardCorners│
+                  │ cv2.calibrateCamera      │
+                  └──────────────────────────┘
 ```
 
-**Frontend:** Vanilla JavaScript (ES6 modules), Three.js r128 via CDN, IBM Plex Mono / Plex Sans Condensed via Google Fonts. No build step.
+**Frontend:** Vanilla JavaScript (ES6 modules), Three.js r128 via CDN, OpenCV.js 4.10.0 (vendored), IBM Plex Mono / Plex Sans Condensed via Google Fonts. No build step for the runtime (Vitest for unit tests only).
 
-**Backend:** FastAPI, OpenCV (headless), NumPy, Pydantic. Stateless — each request processes one frame independently.
+**Backend:** FastAPI, OpenCV (headless), NumPy, Pydantic. Handles camera calibration only — one endpoint, stateless.
 
 ## Project Structure
 
 ```
 ar-cube/
-├── docker-compose.yml               # Dev orchestration
+├── docker-compose.yml
 ├── frontend/
-│   ├── Dockerfile                   # nginx-alpine
-│   ├── .dockerignore
+│   ├── Dockerfile
 │   ├── index.html
+│   ├── package.json                # Vitest dev dependency
+│   ├── vitest.config.js
+│   ├── assets/
+│   │   └── checkerboard-9x6-25mm.pdf
 │   ├── css/styles.css
-│   └── js/
-│       ├── main.js                  # Orchestrator, tracking loop, keyboard, telemetry
-│       ├── webcamHandler.js         # getUserMedia + frame capture
-│       ├── sceneManager.js          # Three.js scene + procedural cube + focal scale
-│       ├── apiClient.js             # fetch wrapper (sends target_x/y if set)
-│       ├── overlayManager.js        # Coord conversion + pose smoothing + manual calib
-│       └── interactionControls.js   # Mouse wheel zoom (CSS scale on container)
+│   ├── js/
+│   │   ├── main.js                 # Orchestrator (slim)
+│   │   ├── webcamHandler.js        # getUserMedia
+│   │   ├── sceneManager.js         # Three.js scene
+│   │   ├── overlayManager.js       # Coord conversion + manual calibration nudges
+│   │   ├── interactionControls.js  # Mouse wheel zoom
+│   │   ├── tracker.js              # State machine
+│   │   ├── poseFilter.js           # Hysteresis + still-detection + smoothing
+│   │   ├── cvWorker.js             # Main-thread worker host
+│   │   ├── cvWorker.worker.js      # OpenCV.js hot loop (worker)
+│   │   ├── calibrationUI.js        # Chessboard capture flow
+│   │   ├── apiClient.js            # Calibration POST wrapper
+│   │   └── __tests__/              # Vitest unit tests (poseFilter, roi, tracker)
+│   └── vendor/
+│       └── opencv.js               # OpenCV.js 4.10.0
 ├── backend/
-│   ├── Dockerfile                   # python:3.11-slim + opencv deps
-│   ├── .dockerignore
-│   ├── main.py                      # FastAPI app + CORS
-│   ├── config.py                    # All tunable constants
-│   ├── api/routes.py                # POST /api/estimate-pose
+│   ├── Dockerfile
+│   ├── main.py
+│   ├── config.py
+│   ├── api/routes.py               # POST /api/calibrate-camera
 │   ├── services/
-│   │   ├── click_segment_detector.py  # Primary: floodFill from click point
-│   │   ├── feature_detector.py        # Fallback: global candidate scoring
-│   │   ├── aruco_detector.py          # Inactive (DETECTION_MODE = "click_segment")
-│   │   └── pose_estimator.py          # solvePnP (IPPE) + distance sanity
-│   ├── models/schemas.py            # Pydantic response model
-│   ├── utils/image_processor.py     # JPEG/PNG decode
-│   ├── tests/                       # 16 pytest tests
+│   │   └── camera_calibrator.py    # cv2.calibrateCamera wrapper
+│   ├── models/schemas.py
+│   ├── utils/image_processor.py
+│   ├── tests/                      # 11 pytest tests
 │   └── requirements.txt
 ├── docs/
-│   ├── HANDOVER.md                  # Frank account of state, journey, known issues
-│   ├── marker/                      # Inactive — ArUco generator + sample marker
+│   ├── HANDOVER.md
 │   └── superpowers/
-│       ├── specs/                   # Design specs (with mid-flight pivots noted)
-│       └── plans/                   # Implementation plan
-└── README.md                        # This file
+│       ├── specs/
+│       └── plans/
+└── README.md
 ```
 
 ## Setup
@@ -96,7 +103,7 @@ ar-cube/
 - Modern browser with `getUserMedia` and CSS `:has()` support (Chrome 105+, Safari 15.4+, Firefox 121+)
 - A webcam
 - A 5cm white 3D-printed cube (no markers required)
-- **Either** Docker Desktop (recommended) **or** Python 3.9+ for a host install
+- **Either** Docker Desktop (recommended) **or** Python 3.9+ for a host install, and Node.js 18+ (for running frontend tests; not required for the runtime)
 
 ### Option 1: Docker (recommended)
 
@@ -141,11 +148,13 @@ The page must be served over HTTP (not opened as `file://`) for `getUserMedia` t
 ### Running tests
 
 ```bash
-# In Docker
+# Backend
 docker compose exec backend python -m pytest tests/ -v
-
-# On host
+# Or on host:
 cd backend && source venv/bin/activate && python -m pytest tests/ -v
+
+# Frontend (host install required once)
+cd frontend && npm install && npx vitest run
 ```
 
 ## Usage
@@ -153,8 +162,10 @@ cd backend && source venv/bin/activate && python -m pytest tests/ -v
 1. **Start Camera** — click the button and grant webcam permission.
 2. **Position the cube** in front of the webcam.
 3. **Start Tracking** — click the toggle.
-4. **Click directly on a white face of the cube in the viewport.** This is required. The click seeds `cv2.floodFill` to segment the connected color region you pointed at; the system then tracks that region's centroid frame-to-frame.
-5. **Calibrate** — use keyboard shortcuts (below) to nudge the rendered overlay onto the physical cube. Calibration persists in `localStorage` between sessions.
+4. **Click directly on a white face of the cube in the viewport.** This is required. The click seeds `cv.floodFill` (HSV space) to segment the connected color region you pointed at; the system then tracks that region's centroid frame-to-frame.
+5. **(Recommended first time)** Click **Calibrate Camera** in the topbar. Print the chessboard from `frontend/assets/checkerboard-9x6-25mm.pdf`. Hold it at varied angles until 12 frames are captured. Reprojection error < 0.5 px is good. Click Save. Intrinsics persist in localStorage and are used automatically by the tracker.
+
+   After calibration, the `[` and `]` keys become an optional fallback for fine-tuning if needed.
 6. **Inspect** — mouse wheel zooms both video and overlay together.
 7. **Re-click** the cube any time tracking drifts. **Right-click or Esc** clears the target and resets pose smoothing.
 
@@ -202,31 +213,26 @@ UI signals while tracking:
 
 ## API
 
-**POST** `/api/estimate-pose`
+The backend exposes a single endpoint used only during camera calibration setup.
 
-| Param | Location | Description |
-|-------|----------|-------------|
-| `image` | multipart form | JPEG or PNG frame, max 10 MB |
-| `video_width` | query string | Frame width in pixels |
-| `video_height` | query string | Frame height in pixels |
-| `target_x`, `target_y` | query string (optional) | Click-segment seed point in image px |
+**POST** `/api/calibrate-camera`
+
+Request: `multipart/form-data` with up to 30 JPEG frames + a JSON sidecar containing per-frame corner pixel arrays (already detected client-side via `cv.findChessboardCornersSB`) + `frame_width`, `frame_height`, `pattern_size_inner_corners` (default `[9, 6]`), `square_size_mm` (default `25`).
 
 Response (200):
 
 ```json
 {
   "success": true,
-  "rotation_matrix": [[r00, r01, r02], [r10, r11, r12], [r20, r21, r22]],
-  "translation_vector": [tx, ty, tz],
   "camera_matrix": [[fx, 0, cx], [0, fy, cy], [0, 0, 1]],
-  "image_points": [[x0, y0], [x1, y1], [x2, y2], [x3, y3]],
-  "candidates": [{ "corners": [...], "score": 1234.5, "accepted": false, "reason": "rej[poly]:sat=120" }, ...],
-  "detection_method": "click_segment",
+  "dist_coeffs": [k1, k2, p1, p2, k3],
+  "reproj_err_px": 0.31,
+  "frames_used": 12,
   "error_message": null
 }
 ```
 
-When the cube isn't detected: `success: false`, `error_message` populated, matrices `null`. HTTP 400/422 for invalid input. The `candidates` field is populated only in contour-fallback mode for debug visualization.
+On failure (insufficient frames, calibration didn't converge, corrupt JPEG): `success: false`, `error_message` populated. HTTP 400/422 for invalid input.
 
 Interactive API docs: `http://localhost:8000/docs`
 
@@ -234,18 +240,16 @@ Interactive API docs: `http://localhost:8000/docs`
 
 | Decision | Choice | Why |
 |----------|--------|-----|
-| Detection (primary) | `cv2.floodFill` with color tolerance from user click | The click is the disambiguator — segmentation is bounded to the connected color region the user pointed at. Eliminates "which white quad is the cube" guessing. |
-| Tracking | Previous detection's centroid → next frame's seed | Once initialized, system follows the cube. EMA smoothing (factor 0.4) on the seed for stability. |
-| Detection (fallback) | Otsu/adaptive threshold + contour filtering + whiteness/aspect/fill discriminators | Used when user hasn't clicked yet. Unreliable in cluttered scenes. |
-| Pose solver | `cv2.SOLVEPNP_IPPE` via `solvePnPGeneric` + min-reprojection-error pick | `IPPE_SQUARE` returned wrong solutions (huge reprojection errors) in our OpenCV 4.13. `IPPE` returns 2 solutions for the planar 2-fold ambiguity; we pick the one with smallest reprojection error and plausible distance. |
+| Hot loop | OpenCV.js in a Web Worker, browser-side | Eliminates JPEG-encode-POST-decode per frame; sustained 30+ fps realistic on a typical laptop. |
+| Detection (primary) | HSV-space `cv.floodFill` with asymmetric tolerance from user click | The click is the disambiguator — segmentation is bounded to the connected color region the user pointed at. HSV (vs BGR) stops bleed onto white desks/paper: hue ±10, sat ±25, val ±40. |
+| Tracking | Previous detection's centroid + velocity prediction → next frame's seed | Once initialized, system follows the cube. ROI crops to 1.5× expanded bbox for throughput. |
+| Pose solver | `cv.solvePnPGeneric(SOLVEPNP_IPPE)` via OpenCV.js | `IPPE` returns 2 solutions for the planar 2-fold ambiguity; solution is picked by rotation hysteresis score. |
+| Pose smoothing | Three layers — IPPE solution hysteresis, still-frame multi-frame averaging (Markley quaternion mean), EMA/slerp output smoothing | Hysteresis kills twitching; Markley averaging eliminates static jitter; lighter output smoothing reduces lag. |
+| Camera calibration | Chessboard-based via 12-frame `cv2.calibrateCamera` batch (POST /api/calibrate-camera); intrinsics persisted to localStorage | Replaces `[`/`]` focal-scale guessing. One-time per camera setup; reproj error < 0.5 px is good. |
 | Pose sanity check | Reject if distance < 8cm or > 3m | Catches solvePnP near-pose ambiguity that puts the cube absurdly close to camera. |
-| Frame-to-frame validation | Reject detection if centroid jumps > 80px (after 8 consecutive rejects, accept anyway) | Prevents tracking from leaking onto adjacent objects without blocking real fast movements. |
 | Drift validation | Reject if target drifts > 250px from original click | Prevents slow drift onto another object frame-by-frame. |
-| Pose smoothing | Translation EMA 0.30, rotation slerp 0.15 | Translation stays responsive; rotation noise is the dominant jitter source so it's heavily damped. |
-| Manual calibration | Keyboard nudges (`dx, dy, dz, scale, focal_scale`) persisted to localStorage | Cleaner than implementing full camera calibration; one-time visual tune per camera setup. |
+| Manual calibration | Keyboard nudges (`dx, dy, dz, scale, focal_scale`) persisted to localStorage | Fine-tune fallback after chessboard calibration; arrows, PgUp/Dn, +/−, [/]. |
 | Level lock | Optional toggle to ignore detected rotation | Markerless rotation estimation on a featureless cube is fundamentally noisy. Position-only mode is honest about that. |
-| Camera intrinsics | `focal = video_width × focal_scale`, principal point at center | Tunable via `[ / ]` keys. Default 1.0 is a starting heuristic, not a calibration. |
-| Tracking cadence | In-flight throttling, ~10 fps cap | Auto-adapts to backend latency without queueing requests. |
 | Lost detection | Keep last good pose | Stable visual experience; cube lags rather than blinks off. |
 | Zoom | CSS scale on the video container | Preserves AR alignment — video and overlay scale uniformly. |
 | Overlay model | Procedural Three.js multi-shell wireframe + corner spheres | No upload step. Glow effect via stacked wireframe shells (avoids EffectComposer/UnrealBloom transparency issues on the overlay canvas). |
@@ -256,13 +260,13 @@ Interactive API docs: `http://localhost:8000/docs`
 Markerless detection of a featureless white cube is **fundamentally hard**. The system has been engineered as far as it can go on that constraint; specific limitations are listed honestly:
 
 - **User click is required.** Without a click there's no way to disambiguate the cube from other white objects. This is a feature, not a bug.
-- **Detection can spill** if the cube touches a similarly-colored surface (white wall, white desk). Re-click on a fully-bounded cube face.
-- **Pose has 4-way rotational symmetry.** A square has no inherent "up" — solvePnP picks one of 4 rotations, possibly off by 90° from your intended orientation.
-- **Pose rotation is noisy.** Slight detection corner noise → meaningfully different rotation. The level-lock toggle (`L` key) sidesteps this for use cases that only care about position.
-- **Camera intrinsics are heuristic.** Default `focal = video_width` is approximate. Different webcams have different actual focal lengths. Tune via `[ / ]` keys; calibration persists in localStorage.
+- **Detection can spill** if the cube touches a similarly-colored surface in HSV space. HSV floodFill is much more resistant than BGR, but extreme overlap (very similar hue + saturation) can still cause issues. Re-click on a fully-bounded cube face.
+- **Pose has 4-way rotational symmetry.** A square has no inherent "up" — solvePnP picks one of 4 rotations, possibly off by 90° from your intended orientation. Without markers this is unfixable.
+- **Pose rotation can still jitter** during fast motion (IPPE hysteresis and still-averaging help most, but not all, cases). The level-lock toggle (`L` key) sidesteps this for use cases that only care about position.
+- **Camera intrinsics need one-time chessboard calibration** for accurate distance/scale. Run Calibrate Camera before first use; intrinsics persist in localStorage.
 - **Single camera, single cube.** No multi-camera or multi-cube support.
 
-If detection is unreliable, the parameters in `backend/config.py` to tune are: `FLOOD_TOLERANCE_LO/HI` (color tolerance — wider lets in more variation but risks bleeding into background), `SEGMENT_MIN_AREA` / `SEGMENT_MAX_AREA_RATIO` (size sanity), and `SEGMENT_SEARCH_RADIUS_PX` (how far from the click to search if the exact pixel doesn't seed a usable region).
+If detection is unreliable, the parameters to tune are in `frontend/js/cvWorker.worker.js`: `FLOOD_TOL_H/S/V` (HSV color tolerance — wider lets in more variation but risks bleeding), `SEGMENT_MIN_AREA` / `SEGMENT_MAX_AREA_RATIO` (size sanity), and `SEGMENT_SEARCH_RADIUS_PX` (how far from the click to search if the exact pixel doesn't seed a usable region).
 
 ## Troubleshooting
 
@@ -272,26 +276,26 @@ If detection is unreliable, the parameters in `backend/config.py` to tune are: `
 
 **"Click the cube in the viewport to start tracking"** — the system needs your click to know which white object is THE cube.
 
-**Detection drifts off the cube** — flood fill spilled into a similarly-colored surface. Right-click to clear, then re-click in the middle of a clean cube face. If it keeps happening, lower `FLOOD_TOLERANCE_LO/HI` (more conservative segmentation).
+**Detection drifts off the cube** — HSV flood fill spilled into a similarly-colored surface. Right-click to clear, then re-click in the middle of a clean cube face. If it keeps happening, lower `FLOOD_TOL_H/S/V` in `frontend/js/cvWorker.worker.js` (more conservative segmentation).
 
-**Detection clamps to a tiny region inside the cube** — your click landed on a shadow or speckle. Click again on a more uniformly lit area, or raise `FLOOD_TOLERANCE_LO/HI`.
+**Detection clamps to a tiny region inside the cube** — your click landed on a shadow or speckle. Click again on a more uniformly lit area, or raise `FLOOD_TOL_S/V`.
 
 **`detection drifted from click — re-click to recover`** — the auto-following centroid wandered more than 250px from where you originally clicked. This is the safety net catching slow drift onto other objects. Re-click.
 
 **Cube model never appears** — likely a `matrixWorldNeedsUpdate` issue. `overlayManager.applyPose` must set this flag to `true` after writing to `model.matrix`. (Already fixed; mentioned for future regressions.)
 
-**Cube renders much too big and close to camera** — solvePnP's near-pose ambiguity. Should already be caught by the distance sanity check (< 8cm rejected). If it slips through, tighten `MIN_POSE_DISTANCE_M` in `backend/config.py`.
+**Cube renders much too big and close to camera** — solvePnP's near-pose ambiguity. Should already be caught by the distance sanity check (< 8cm rejected). Try running Calibrate Camera for accurate intrinsics.
 
-**Cube position is consistently offset** — your webcam's actual focal length differs from `video_width`. Press `[` repeatedly to reduce `focal_scale` until alignment improves. Save by leaving the page (calibration persists).
+**Cube position is consistently offset** — run Calibrate Camera for accurate intrinsics. As a quick fallback, `[` / `]` keys adjust focal scale until alignment improves; calibration persists in localStorage.
 
-**Tracking is jumpy/anxious** — already heavily damped via translation/rotation smoothing. To go further, lower `POSE_ROT_SMOOTHING` in `frontend/js/overlayManager.js` from 0.15 toward 0.05 (more damping, more lag). Or press `L` for level-lock.
+**Tracking is jumpy/anxious** — IPPE hysteresis + Markley still-averaging handle most jitter. For residual noise, lower `POSE_ROT_SMOOTHING` in `frontend/js/poseFilter.js` from 0.40 toward 0.15 (more damping, more lag). Or press `L` for level-lock.
 
 ## Documentation
 
 - **Handover document:** `docs/HANDOVER.md` — frank account of project state, journey, known issues, what to try next.
-- **Design spec:** `docs/superpowers/specs/2026-05-09-ar-cube-phases-3-5-design.md`
-- **Implementation plan:** `docs/superpowers/plans/2026-05-09-ar-cube-phases-3-5.md`
-- **Docker spec:** `docs/superpowers/specs/2026-05-09-docker-dev-setup-design.md`
+- **Efficiency & stability design spec:** `docs/superpowers/specs/2026-05-14-efficiency-stability-design.md`
+- **Efficiency & stability implementation plan:** `docs/superpowers/plans/2026-05-14-efficiency-stability.md`
+- **Original design spec:** `docs/superpowers/specs/2026-05-09-ar-cube-phases-3-5-design.md`
 
 ## License
 

@@ -9,14 +9,10 @@
  */
 
 const CUBE_SIDE_LENGTH = 0.05;       // Must match backend config
-const POSE_TRANS_SMOOTHING = 0.30;   // translation EMA — keep responsive
-const POSE_ROT_SMOOTHING = 0.15;     // rotation EMA — heavier dampening (rotation noise from IPPE is the dominant jitter source)
 
 class OverlayManager {
     constructor(sceneManager) {
         this.sceneManager = sceneManager;
-        this._smoothedPos = null;   // THREE.Vector3
-        this._smoothedQuat = null;  // THREE.Quaternion
 
         // Manual calibration in WORLD space (camera-frame metres).
         // dx, dy, dz are added to the smoothed translation; scale multiplies
@@ -30,57 +26,40 @@ class OverlayManager {
     }
 
     /**
-     * Apply pose estimation result to the 3D model.
+     * Apply an already-smoothed pose (from poseFilter) to the 3D model.
+     * poseData: { R: 3x3 row-major, t: [x,y,z] }
      */
     applyPose(poseData, model) {
-        const { rotation_matrix: rot, translation_vector: tvec } = poseData;
+        const { R, t } = poseData;
 
-        // OpenCV → Three.js
         const targetMat = new THREE.Matrix4();
         targetMat.set(
-            rot[0][0],  rot[0][1],  rot[0][2],  tvec[0],
-            -rot[1][0], -rot[1][1], -rot[1][2], -tvec[1],
-            -rot[2][0], -rot[2][1], -rot[2][2], -tvec[2],
-            0,          0,          0,           1
+            R[0][0],  R[0][1],  R[0][2],  t[0],
+            -R[1][0], -R[1][1], -R[1][2], -t[1],
+            -R[2][0], -R[2][1], -R[2][2], -t[2],
+            0,        0,        0,        1
         );
 
-        const targetPos = new THREE.Vector3();
-        const targetQuat = new THREE.Quaternion();
+        const pos = new THREE.Vector3();
+        const quat = new THREE.Quaternion();
         const _scale = new THREE.Vector3();
-        targetMat.decompose(targetPos, targetQuat, _scale);
+        targetMat.decompose(pos, quat, _scale);
 
-        if (this._smoothedPos === null) {
-            this._smoothedPos = targetPos.clone();
-            this._smoothedQuat = targetQuat.clone();
-        } else {
-            this._smoothedPos.lerp(targetPos, POSE_TRANS_SMOOTHING);
-            this._smoothedQuat.slerp(targetQuat, POSE_ROT_SMOOTHING);
-        }
+        pos.x += this.calib.dx;
+        pos.y += this.calib.dy;
+        pos.z += this.calib.dz;
 
-        // Apply manual calibration offset (in camera/world space)
-        const adjustedPos = this._smoothedPos.clone();
-        adjustedPos.x += this.calib.dx;
-        adjustedPos.y += this.calib.dy;
-        adjustedPos.z += this.calib.dz;
+        const renderQuat = this.levelLock ? new THREE.Quaternion() : quat;
 
-        const renderQuat = this.levelLock
-            ? new THREE.Quaternion()  // identity = no rotation, upright cube
-            : this._smoothedQuat;
+        const m = new THREE.Matrix4();
+        m.compose(pos, renderQuat, new THREE.Vector3(1, 1, 1));
 
-        const smoothedMat = new THREE.Matrix4();
-        smoothedMat.compose(
-            adjustedPos,
-            renderQuat,
-            new THREE.Vector3(1, 1, 1),
-        );
-
-        // Physical scale * calibration scale
         const sz = CUBE_SIDE_LENGTH * this.calib.scale;
         const scaleMatrix = new THREE.Matrix4();
         scaleMatrix.makeScale(sz, sz, sz);
 
         const finalMatrix = new THREE.Matrix4();
-        finalMatrix.multiplyMatrices(smoothedMat, scaleMatrix);
+        finalMatrix.multiplyMatrices(m, scaleMatrix);
 
         model.matrixAutoUpdate = false;
         model.matrix.copy(finalMatrix);
@@ -108,8 +87,7 @@ class OverlayManager {
     }
 
     reset() {
-        this._smoothedPos = null;
-        this._smoothedQuat = null;
+        // no-op — smoothing state lives in poseFilter.js now
     }
 }
 

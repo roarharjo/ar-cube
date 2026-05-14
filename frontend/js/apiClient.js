@@ -1,56 +1,55 @@
 /**
- * API Client Module
- * Communicates with the backend pose estimation API.
+ * API Client. Backend handles:
+ *   - solvePnPGeneric (the worker's OpenCV.js build doesn't ship it)
+ *   - chessboard corner detection
+ *   - camera calibration
+ *
+ * Detection (HSV floodFill + contour + corners) stays client-side in the worker.
  */
 
 const API_BASE_URL = 'http://localhost:8000';
 
 class ApiClient {
-    /**
-     * Send a video frame to the backend for pose estimation.
-     * @param {Blob} frameBlob - JPEG image blob
-     * @param {number} videoWidth
-     * @param {number} videoHeight
-     * @param {{x: number, y: number}|null} target - Optional target hint in image-pixel coords
-     * @returns {Promise<Object>} Parsed JSON response
-     */
-    async sendFrame(frameBlob, videoWidth, videoHeight, target = null) {
-        const formData = new FormData();
-        formData.append('image', frameBlob, 'frame.jpg');
+  async solvePose(corners, cameraMatrix, distCoeffs) {
+    const r = await fetch(`${API_BASE_URL}/api/solve-pose`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        corners,
+        camera_matrix: cameraMatrix,
+        dist_coeffs: distCoeffs,
+      }),
+    });
+    if (!r.ok) throw new Error(`solve-pose ${r.status}`);
+    return r.json();
+  }
 
-        const params = new URLSearchParams({
-            video_width: String(videoWidth),
-            video_height: String(videoHeight),
-        });
-        if (target) {
-            params.set('target_x', String(target.x));
-            params.set('target_y', String(target.y));
-        }
-        const url = `${API_BASE_URL}/api/estimate-pose?${params}`;
+  async detectChessboard(jpegBlob, cols, rows) {
+    const form = new FormData();
+    form.append('image', jpegBlob, 'frame.jpg');
+    form.append('cols', String(cols));
+    form.append('rows', String(rows));
+    const r = await fetch(`${API_BASE_URL}/api/detect-chessboard`, {
+      method: 'POST',
+      body: form,
+    });
+    if (!r.ok) throw new Error(`detect-chessboard ${r.status}`);
+    return r.json();
+  }
 
-        let response;
-        try {
-            response = await fetch(url, {
-                method: 'POST',
-                body: formData,
-            });
-        } catch (err) {
-            throw new Error('Cannot connect to backend. Is the server running on localhost:8000?');
-        }
-
-        if (!response.ok) {
-            let detail = `Server error (${response.status})`;
-            try {
-                const errData = await response.json();
-                detail = errData.detail || detail;
-            } catch {
-                // ignore JSON parse failure on error responses
-            }
-            throw new Error(detail);
-        }
-
-        return response.json();
+  async submitCalibration(payload) {
+    const r = await fetch(`${API_BASE_URL}/api/calibrate-camera`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      let detail = `Server error (${r.status})`;
+      try { detail = (await r.json()).detail || detail; } catch {}
+      throw new Error(detail);
     }
+    return r.json();
+  }
 }
 
 export default ApiClient;

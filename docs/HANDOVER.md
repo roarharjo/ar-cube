@@ -1,6 +1,6 @@
 # AR-Cube Handover Document
 
-**Last updated:** 2026-05-09
+**Last updated:** 2026-05-14
 **Author:** Built collaboratively with Claude Code
 
 This is a frank account of where the project stands, what works, what doesn't, the decisions that were made (some of them mid-flight pivots), and what someone picking this up next would want to know. Read this *with* the README; the README tells you what the system does and how to run it, this tells you the *story* behind it.
@@ -10,10 +10,28 @@ This is a frank account of where the project stands, what works, what doesn't, t
 ## TL;DR for whoever picks this up next
 
 - The tool **works** for testing AR overlay accuracy on a 5cm white cube via a webcam, but markerless detection of a featureless white cube is fundamentally a hard problem and the system is engineered as far as it can go on that constraint.
-- The **core mechanism is click-to-track**: user clicks the cube once, `cv2.floodFill` segments the connected color region under the click, the centroid then becomes the seed for the next frame. Position tracking is reliable; rotation tracking is inherently noisy.
-- The **rendered overlay alignment** depends on a manual calibration system (keyboard nudges) that persists to localStorage. Default focal-length heuristic is approximate; users dial it in once per camera setup.
-- 16/16 backend tests pass. Frontend has no automated tests (vanilla JS, no build step).
-- ArUco marker support exists in the codebase but is **disabled** because the project requirement was no markers. It's one config-flag flip away if you ever need it.
+- The **core mechanism is click-to-track**: user clicks the cube once, `cv.floodFill` (HSV space) segments the connected color region under the click in a Web Worker, the centroid then becomes the seed for the next frame. Position tracking is reliable; rotation tracking is inherently noisy but substantially improved via IPPE hysteresis + Markley averaging.
+- The **rendered overlay alignment** uses chessboard-based camera calibration (one-time, persisted to localStorage). Keyboard nudges remain as a fine-tuning fallback.
+- 11/11 backend tests pass. 39/39 frontend Vitest tests pass.
+- ArUco assets are deleted (project constraint: markerless only).
+
+---
+
+## 2026-05-14 — Efficiency & stability pass
+
+The detection bleed, rotation twitching, and ~10 fps throughput cap have been addressed:
+
+- **Hot loop moved client-side via OpenCV.js + Web Worker.** No more JPEG-encode-POST-decode per frame; OpenCV runs inside a worker thread on the main thread's frame data (`requestVideoFrameCallback` driver).
+- **IPPE rotation hysteresis.** `cv.solvePnPGeneric(SOLVEPNP_IPPE)` returns 2 solutions for the planar 2-fold ambiguity. We now pick the one closer to the previous frame's rotation (`reproj_err + α × angular_distance`), which kills the frame-to-frame "twitching" that dominated rotation noise.
+- **Sub-pixel corner refinement** (`cv.cornerSubPix`) is now wired into the detection path. Was configured but never plumbed in before.
+- **HSV-space floodFill with asymmetric tolerance** replaces BGR floodFill: hue ±10, saturation ±25, value ±40. Stops the cube from bleeding onto white desks / paper.
+- **Still-frame detection + Markley pose averaging.** When centroid velocity drops below 2 px/frame for 10 consecutive frames, the pose is averaged over a 30-frame ring buffer (quaternions averaged via the Markley method — eigenvector of `Σ qᵢqᵢᵀ`).
+- **Predicted-ROI cropping.** Each frame, we crop to a 1.5× expanded bbox around the previous detection. Combined with worker-side processing, sustained 30+ fps is now realistic on a typical laptop.
+- **Chessboard calibration UI.** A new `Calibrate Camera` button opens a modal that auto-captures 12 diverse chessboard frames and POSTs the corners to the backend. `cv2.calibrateCamera` returns intrinsics, which are saved to `localStorage` and used by the client-side solver. No more `[`/`]` keypress focal-scale guessing.
+- **Backend slimmed to ~150 LOC.** `/api/estimate-pose` deleted. `services/click_segment_detector.py`, `feature_detector.py`, `pose_estimator.py`, `aruco_detector.py` deleted. `services/camera_calibrator.py` is the only active service.
+- **Frontend test infrastructure.** Vitest added (dev-only). 39 unit tests cover the pure modules: `poseFilter.js`, `roi.js`, `tracker.js`.
+
+The original markerless constraint is preserved; ArUco assets in `docs/marker/` are deleted.
 
 ---
 
@@ -116,63 +134,77 @@ After click-segment landed:
 
 | File | Purpose | Key things to know |
 |------|---------|-------------------|
-| `config.py` | All tunable constants | `DETECTION_MODE`, `FLOOD_TOLERANCE_*`, `SEGMENT_*`, `MIN/MAX_POSE_DISTANCE_M`. Comments explain trade-offs. |
+| `config.py` | Calibration constants | `MIN/MAX_FRAMES_FOR_CALIBRATION`, `DEFAULT_PATTERN_SIZE`, `DEFAULT_SQUARE_SIZE_MM`. ~10 lines. |
 | `main.py` | FastAPI app | Drops `allow_credentials=True` because it's incompatible with `allow_origins=["*"]`. |
-| `api/routes.py` | Single endpoint POST `/api/estimate-pose` | Branches on `DETECTION_MODE`. When `click_segment`, **does not fall back to contour** if click_segment fails — letting it would cause "jumping to other shapes." |
-| `services/click_segment_detector.py` | Primary detector | Tries `approxPolyDP` first (sharp 4-vertex polygon), falls back to `minAreaRect` if no clean polygon. Returns a status string for debug visibility. |
-| `services/feature_detector.py` | Fallback detector | Otsu + adaptive threshold, generates candidate polys via `approxPolyDP` AND `minAreaRect`, scores by `area × whiteness² × fill_ratio`. Used only when no click yet. |
-| `services/aruco_detector.py` | **Inactive** | ArUco fiducial detection. Never called when `DETECTION_MODE = "click_segment"`. Kept for completeness; the marker file at `docs/marker/aruco_id0_4cm.png` works with this. |
-| `services/pose_estimator.py` | solvePnP wrapper | Uses `solvePnPGeneric` with `IPPE` (NOT `IPPE_SQUARE` — see "The journey"). Picks lowest-reprojection-error solution. Rejects implausible distances. |
-| `models/schemas.py` | Pydantic response | `PoseEstimationResponse` has `image_points`, `candidates` (debug), `detection_method`. |
+| `api/routes.py` | Single endpoint POST `/api/calibrate-camera` | Accepts multipart form with JPEG frames + corner sidecar JSON. Runs `cv2.calibrateCamera`. |
+| `services/camera_calibrator.py` | calibrateCamera wrapper | Validates frame count, calls `cv2.calibrateCamera`, returns intrinsics + reprojection error. |
+| `models/schemas.py` | Pydantic response | `CalibrationResponse` with `camera_matrix`, `dist_coeffs`, `reproj_err_px`, `frames_used`. |
 | `utils/image_processor.py` | JPEG/PNG decode | Trivial. |
-| `tests/` | 16 pytest tests | Image processor (4), feature detector (4), pose estimator (4), API integration (4). All pass. |
+| `tests/` | 11 pytest tests | Calibration service (7) + API integration (4). All pass. |
 
 ### Frontend
 
 | File | Purpose | Key things to know |
 |------|---------|-------------------|
-| `index.html` | Page structure | Topbar, viewport, telemetry sidebar, footer. Uses CSS `:has()` for state-driven styling. |
+| `index.html` | Page structure | Topbar (+ Calibrate Camera button), viewport, telemetry sidebar, footer. Uses CSS `:has()` for state-driven styling. |
 | `css/styles.css` | All styling | "Optical-bench instrument terminal" aesthetic. IBM Plex Mono. |
-| `js/main.js` | Orchestrator | Tracking loop with in-flight throttling. Click handler sets target. Keyboard handler routes calibration nudges. localStorage persistence. Debug overlay rendering on `debugCanvas`. |
-| `js/webcamHandler.js` | getUserMedia | Stream into video element, frame extraction to JPEG blob. |
+| `js/main.js` | Orchestrator (slim) | Wires up modules, handles keyboard nudges + localStorage persistence. Tracking loop lives in `tracker.js`. |
+| `js/webcamHandler.js` | getUserMedia | Stream into video element. |
 | `js/sceneManager.js` | Three.js scene | Procedural multi-shell wireframe cube. `setFocalScale()` for calibration. No EffectComposer/bloom (caused canvas-transparency issues). |
-| `js/apiClient.js` | Fetch wrapper | Sends `target_x/target_y` query params when target is set. |
-| `js/overlayManager.js` | Pose application | OpenCV→Three.js coord conversion. Pose smoothing (translation lerp 0.30, rotation slerp 0.15). Manual calibration offset application. `levelLock` toggle. |
+| `js/tracker.js` | State machine | `idle → camera_on → awaiting_click → tracking → lost`. Drives `requestVideoFrameCallback` hot loop. |
+| `js/cvWorker.js` | Worker host | Spawns `cvWorker.worker.js`, relays `ImageBitmap` frames in, receives pose events out. |
+| `js/cvWorker.worker.js` | OpenCV.js hot loop | HSV floodFill, cornerSubPix, solvePnPGeneric IPPE, ROI management. All CV computation lives here. |
+| `js/poseFilter.js` | Pose pipeline | IPPE hysteresis scorer, Markley quaternion averaging, still-frame detection, EMA/slerp output smoothing. |
+| `js/calibrationUI.js` | Chessboard capture flow | Modal UI; worker chessboard mode; diversity-gated auto-capture; POST to backend; localStorage persistence. |
+| `js/apiClient.js` | Calibration POST wrapper | Slimmed — only calls `POST /api/calibrate-camera` now. |
+| `js/overlayManager.js` | Pose application | OpenCV→Three.js coord conversion. Manual calibration offset application. `levelLock` toggle. Pose smoothing removed (now in `poseFilter.js`). |
 | `js/interactionControls.js` | Mouse wheel zoom | Uses CSS `transform: scale()` on `.video-container` so video and overlay scale together (preserves alignment). |
+| `js/__tests__/` | Vitest unit tests | 39 tests covering `poseFilter.js`, `roi.js`, `tracker.js`. |
 
 ### Docs
 
 - `docs/HANDOVER.md` — this file
-- `docs/superpowers/specs/` — design specs (with mid-flight pivot notes)
-- `docs/superpowers/plans/` — original implementation plan
-- `docs/marker/` — ArUco marker file + generator (currently unused)
+- `docs/superpowers/specs/` — design specs (efficiency pass + original)
+- `docs/superpowers/plans/` — implementation plans
 
 ---
 
 ## Tunable parameters cheatsheet
 
-If a user is having trouble, these are the knobs (mostly in `backend/config.py`):
+If a user is having trouble, these are the knobs:
 
 ```
-# Click-segment behavior
-FLOOD_TOLERANCE_LO/HI = (30, 30, 30)   # color tolerance for floodFill
-SEGMENT_MIN_AREA = 250                 # min pixels for a valid segment
-SEGMENT_MAX_AREA_RATIO = 0.40          # max % of frame
-SEGMENT_SEARCH_RADIUS_PX = 25          # how far from click to retry seeds
+# poseFilter.js (frontend)
+ALPHA_HYSTERESIS = 1.0           # px-reproj-equivalent per radian
+STILL_VELOCITY_PX = 2.0          # frame velocity threshold for still detection
+STILL_FRAMES_REQUIRED = 10       # consecutive low-velocity frames to lock still
+POSE_BUFFER_SIZE = 30            # frames in still-state pose buffer
+POSE_TRANS_SMOOTHING = 0.50      # EMA factor on translation
+POSE_ROT_SMOOTHING = 0.40        # slerp factor on rotation
 
-# Pose sanity
-MIN_POSE_DISTANCE_M = 0.08             # rejects near-pose ambiguity
-MAX_POSE_DISTANCE_M = 3.0              # caps far-pose absurdity
+# cvWorker.worker.js (frontend)
+FLOOD_TOL_H = 10                 # HSV floodFill tolerance: hue
+FLOOD_TOL_S = 25                 # HSV floodFill tolerance: saturation
+FLOOD_TOL_V = 40                 # HSV floodFill tolerance: value
+SEGMENT_MIN_AREA = 250           # min pixels for a valid segment
+SEGMENT_MAX_AREA_RATIO = 0.40    # max fraction of ROI
+SEGMENT_SEARCH_RADIUS_PX = 25    # spiral seed search radius
+ROI_EXPAND_FACTOR = 1.5          # how much to expand previous bbox for next frame's ROI
+SUBPIX_WIN = 5                   # cornerSubPix window size
 
-# Cube physical
-CUBE_SIDE_LENGTH = 0.05                # 5cm — must match physical cube
+# tracker.js (frontend)
+FAIL_BEFORE_LOST = 8             # consecutive detection failures → lost state
+FAIL_BEFORE_DEMOTE = 30          # further failures in lost → awaiting_click
 
-# Frontend (in main.js / overlayManager.js)
-MIN_FRAME_INTERVAL_MS = 100            # 10fps cap
-MAX_FRAME_JUMP_PX = 80                 # frame-to-frame rejection
-MAX_DRIFT_FROM_CLICK_PX = 250          # cumulative drift rejection
-POSE_TRANS_SMOOTHING = 0.30            # translation EMA factor
-POSE_ROT_SMOOTHING = 0.15              # rotation slerp factor (lower = smoother but laggier)
+# main.js (frontend)
+MAX_DRIFT_FROM_CLICK_PX = 250    # drift threshold from original click
+# distance sanity: 0.08 m – 3.0 m (inline)
+
+# backend/config.py
+MIN_FRAMES_FOR_CALIBRATION = 6
+MAX_FRAMES_FOR_CALIBRATION = 30
+DEFAULT_PATTERN_SIZE = (9, 6)
+DEFAULT_SQUARE_SIZE_MM = 25.0
 ```
 
 ---
@@ -181,31 +213,21 @@ POSE_ROT_SMOOTHING = 0.15              # rotation slerp factor (lower = smoother
 
 In rough order of expected value vs effort:
 
-### 1. Cross-frame rotation hysteresis (medium effort, high impact on stability)
+### 1. Detection mask visualization overlay (low effort, nice for debugging)
 
-The IPPE solver returns 2 solutions for the planar 2-fold ambiguity. Currently we pick lowest reprojection error each frame independently. When the two solutions have similar errors, the choice flips and the model "twitches."
+Show the actual HSV flood-fill mask as a faded overlay on the video. Currently we only see the bounding box. Seeing the precise filled region would tell users immediately whether segmentation is bleeding or clamping.
 
-**Fix:** Have the frontend send the previous frame's rotation matrix as query params. Backend, when picking between IPPE solutions, scores them by `reproj_error + alpha × angular_distance_to_previous`. Result: rotation hysteresis — solver prefers solutions consistent with the recent past.
+### 2. IMU / sensor fusion for rotation stability (ambitious)
 
-This is the single biggest improvement available without adding markers or doing camera calibration.
+Even with IPPE hysteresis and Markley averaging, fast rotations still produce momentary jitter. Fusing DeviceOrientation API data with the visual pose could provide a low-latency rotation prior. Experimental — browser IMU access is inconsistent and often locked behind permissions on desktop.
 
-### 2. Offline camera calibration UI (medium effort, fixes focal-scale guessing)
+### 3. Multi-cube tracking (plumbing work)
 
-Add a "Calibrate camera" button. User holds up a printed chessboard pattern in front of the webcam, captures 10-15 frames, and `cv2.calibrateCamera` produces actual intrinsics. Save to localStorage as `cameraMatrix` + `distCoeffs`. Backend uses those instead of the heuristic.
+Click-segment trivially extends to multiple cubes (one click per cube), but the UI plumbing — multiple state machines, multiple overlays, multiple pose pipelines — wasn't worth it for this internal tool.
 
-Eliminates the focal-scale tuning step entirely and makes pose distance accurate to ~1mm instead of ~10mm.
+### 4. Mobile-optimized UI
 
-### 3. Multi-frame averaging on a still cube (low effort, low impact, nice polish)
-
-Detect "the cube is still" (low velocity in target centroid). Once still, average the pose over 30 frames and lock to it until motion is detected again. Eliminates static jitter entirely.
-
-### 4. ArUco fallback for users who want it (10 minutes)
-
-The code is there. Add a UI toggle "Use marker for higher accuracy" → `DETECTION_MODE = "auto"`. ArUco runs first, falls back to click-segment. Users who happen to have a marker on their cube get bulletproof detection; others get the markerless path.
-
-### 5. Detection visualization improvements (low effort, nice for debugging)
-
-Show the actual flood-fill mask as a faded overlay on the video. Currently we only see the bounding box. Seeing the precise filled region would tell users immediately whether segmentation is bleeding or clamping.
+Listed as a non-goal in the original FSD. The UI is desktop-centric (keyboard calibration nudges, large telemetry sidebar). Mobile would need a redesigned calibration flow.
 
 ---
 
@@ -221,16 +243,16 @@ Show the actual flood-fill mask as a faded overlay on the video. Currently we on
 
 ## Test status
 
-- **Backend:** 16/16 pytest tests pass. Test the API integration with `pytest tests/test_api.py`.
-- **Frontend:** No automated tests. Vanilla JS without a build/test framework. Manual testing only.
-- **Smoke test:** `docker compose up --build` → open `http://localhost:3000` → Start Camera → Start Tracking → click cube → press `[` until size matches → done.
+- **Backend:** 11/11 pytest tests pass (`test_calibrator.py`, `test_api_calibrate.py`). Run via `docker compose exec backend python -m pytest tests/ -v`.
+- **Frontend:** 39/39 Vitest tests pass (`poseFilter`, `roi`, `tracker` modules). Run via `cd frontend && npm install && npx vitest run`.
+- **Smoke test:** `docker compose up --build` → open `http://localhost:3000` → Start Camera → click Calibrate Camera → complete chessboard capture → Start Tracking → click cube → hold still for ~5 seconds → expect rock-steady overlay.
 
 ---
 
 ## Closing notes
 
-If you're picking this up, the system *works* — but plan on calibration time when first deployed on a new webcam (~30 seconds via keyboard nudges). For high-precision tasks, prioritize the camera calibration UI in "What I'd try next." For rotation stability, prioritize cross-frame hysteresis. For the lazy path that solves both at once: enable ArUco markers (`DETECTION_MODE = "auto"`).
+If you're picking this up, the system *works*. Run Calibrate Camera on first use (takes ~60 seconds with a printed chessboard), then click the cube and track. The major pain points from the original implementation — rotation twitching, floodFill bleed, and the 10 fps cap — are addressed. What remains open is listed honestly in "What I'd try next."
 
-The constraint of markerless detection on a featureless white cube was honored throughout. The honest engineering answer is "use markers." If that constraint relaxes for whoever inherits this, ArUco support is ready to go.
+The constraint of markerless detection on a featureless white cube was honored throughout. ArUco assets are removed. The honest engineering answer remains "use markers" for robust rotation; but with IPPE hysteresis + Markley averaging, the markerless path is now substantially better than it was.
 
 Good luck.

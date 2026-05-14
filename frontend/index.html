@@ -29,6 +29,9 @@
                     <span class="brand-sub">Optical Pose Tracking // 0.1</span>
                 </div>
             </div>
+            <div class="topbar-actions">
+                <button id="calibrateButton" class="btn btn-secondary" disabled>Calibrate Camera</button>
+            </div>
             <div class="topbar-status">
                 <span id="cameraStatus" class="status-indicator">Camera off</span>
             </div>
@@ -85,7 +88,7 @@
                     <dt>Color</dt><dd>White</dd>
                     <dt>Markers</dt><dd>None</dd>
                     <dt>Detect</dt><dd>floodFill from click</dd>
-                    <dt>Solver</dt><dd>IPPE_SQUARE</dd>
+                    <dt>Solver</dt><dd>IPPE (client-side)</dd>
                 </dl>
 
                 <div class="section-label section-label-spaced">
@@ -111,6 +114,24 @@
             <span>SUCCESS :: <strong id="footerSuccess">—</strong></span>
             <span>UPTIME :: <strong id="footerUptime">00:00</strong></span>
         </footer>
+
+        <div id="calibrationModal" class="modal hidden" role="dialog" aria-modal="true">
+          <div class="modal-card">
+            <h2>Camera Calibration</h2>
+            <p>Print this checkerboard and hold it up to the camera. Tilt and rotate it slowly until 12 diverse frames are captured.</p>
+            <p><a href="assets/checkerboard-9x6-25mm.pdf" download>Download checkerboard (9×6 inner corners, 25 mm squares)</a></p>
+            <div class="calib-progress">
+              <div class="calib-progress-bar"><div id="calibProgressFill" class="calib-progress-fill"></div></div>
+              <div id="calibProgressLabel" class="calib-progress-label">0 / 12</div>
+            </div>
+            <div id="calibResult" class="calib-result"></div>
+            <div class="modal-actions">
+              <button id="calibStartButton" class="btn btn-primary">Begin capture</button>
+              <button id="calibSaveButton" class="btn btn-primary hidden">Save</button>
+              <button id="calibCancelButton" class="btn">Cancel</button>
+            </div>
+          </div>
+        </div>
 
     </div>
 
